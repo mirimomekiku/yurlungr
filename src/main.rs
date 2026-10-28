@@ -21,6 +21,7 @@ mod terminal;
 mod theme;
 mod ui;
 mod views;
+mod workspace;
 
 use std::{env, path::PathBuf};
 
