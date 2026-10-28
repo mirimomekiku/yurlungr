@@ -1,6 +1,7 @@
 mod app;
 mod client;
 mod config;
+mod editor;
 mod file_browser;
 mod git_graph;
 mod hook;
