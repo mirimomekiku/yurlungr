@@ -446,8 +446,8 @@ impl Action {
             OpenFiles => &["prefix f"],
             ClosePane => &["prefix x"],
             ZoomPane => &["prefix z"],
-            NextPane => &["prefix o", "prefix tab"],
-            PrevPane => &["prefix O", "prefix backtab"],
+            NextPane => &["ctrl+tab", "prefix o", "prefix tab"],
+            PrevPane => &["ctrl+backtab", "prefix O", "prefix backtab"],
             FocusLeft => &["prefix h", "prefix left"],
             FocusRight => &["prefix l", "prefix right"],
             FocusUp => &["prefix k", "prefix up"],
@@ -462,7 +462,7 @@ impl Action {
             OpenKeybinds => &["prefix ?"],
             OpenSettings => &["prefix ,"],
             OpenThemes => &["prefix t"],
-            GotoPane(n) => return vec![format!("ctrl+{n}"), format!("prefix {n}")],
+            GotoPane(n) => return vec![format!("alt+{n}"), format!("prefix {n}")],
             FileNewFile => &["n"],
             FileNewDir => &["N"],
             FileRename => &["r", "f2"],
@@ -698,8 +698,10 @@ mod tests {
         assert_eq!(g(false, "ctrl+right"), Some(SplitRight));
         assert_eq!(g(false, "ctrl+down"), Some(SplitDown));
         assert_eq!(g(false, "ctrl+up"), None, "there is no split-up");
-        assert_eq!(g(false, "ctrl+tab"), None, "ctrl+tab is gone");
-        assert_eq!(g(false, "ctrl+3"), Some(GotoPane(3)));
+        assert_eq!(g(false, "ctrl+tab"), Some(NextPane));
+        assert_eq!(g(false, "ctrl+shift+tab"), Some(PrevPane));
+        assert_eq!(g(false, "alt+3"), Some(GotoPane(3)));
+        assert_eq!(g(false, "ctrl+3"), None, "ctrl+digit is no longer bound");
         assert_eq!(g(true, "3"), Some(GotoPane(3)));
         assert_eq!(g(true, "x"), Some(ClosePane));
     }
