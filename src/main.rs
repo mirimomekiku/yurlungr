@@ -1,5 +1,6 @@
 mod agents;
 mod app;
+mod brand;
 mod client;
 mod config;
 mod editor;

@@ -10,6 +10,7 @@ use std::{
 use anyhow::Result;
 
 use crate::{
+    brand,
     integration::{Action, Agent, ALL},
     proto,
 };
@@ -54,7 +55,8 @@ fn ask(question: &str) -> bool {
 }
 
 pub fn run(yes: bool) -> Result<()> {
-    println!("yurlungr setup\n");
+    print!("{}", brand::banner(brand::Color::from_env(io::stdout().is_terminal())));
+    println!("\n  First-run setup\n");
     println!(
         "Hooks let each pane show exactly what its agent is doing (working / blocked / idle)."
     );
