@@ -229,6 +229,8 @@ pub enum Action {
     PrevWorkspace,
     /// Jump to the n-th workspace (1-based).
     GotoWorkspace(u8),
+    /// Jump to the n-th pane of the current workspace (1-based, layout order).
+    GotoPane(u8),
     FileNewFile,
     FileNewDir,
     FileRename,
@@ -277,6 +279,7 @@ impl Action {
             PrevWorkspace,
         ];
         all.extend((1..=9).map(GotoWorkspace));
+        all.extend((1..=9).map(GotoPane));
         all.extend([
             Detach,
             QuitSession,
@@ -345,6 +348,7 @@ impl Action {
             NextWorkspace => "next_workspace",
             PrevWorkspace => "prev_workspace",
             GotoWorkspace(n) => return format!("goto_workspace_{n}"),
+            GotoPane(n) => return format!("goto_pane_{n}"),
             FileNewFile => "file_new_file",
             FileNewDir => "file_new_dir",
             FileRename => "file_rename",
@@ -400,6 +404,7 @@ impl Action {
             NextWorkspace => "Next workspace".into(),
             PrevWorkspace => "Previous workspace".into(),
             GotoWorkspace(n) => format!("Jump to workspace {n}"),
+            GotoPane(n) => format!("Jump to pane {n}"),
             FileNewFile => "Files: new file".into(),
             FileNewDir => "Files: new folder".into(),
             FileRename => "Files: rename".into(),
@@ -445,6 +450,7 @@ impl Action {
             NextWorkspace => "next space".into(),
             PrevWorkspace => "prev space".into(),
             GotoWorkspace(n) => format!("space {n}"),
+            GotoPane(n) => format!("pane {n}"),
             FileNewFile => "new file".into(),
             FileNewDir => "new folder".into(),
             FileRename => "rename".into(),
@@ -494,7 +500,8 @@ impl Action {
             RenameWorkspace => &["prefix r"],
             NextWorkspace => &["prefix n"],
             PrevWorkspace => &["prefix p"],
-            GotoWorkspace(n) => return vec![format!("alt+{n}"), format!("prefix {n}")],
+            GotoWorkspace(n) => return vec![format!("ctrl+{n}"), format!("prefix {n}")],
+            GotoPane(n) => return vec![format!("alt+{n}")],
             FileNewFile => &["n"],
             FileNewDir => &["N"],
             FileRename => &["r", "f2"],
@@ -732,14 +739,14 @@ mod tests {
         assert_eq!(g(false, "ctrl+up"), None, "there is no split-up");
         assert_eq!(g(false, "ctrl+tab"), Some(NextPane));
         assert_eq!(g(false, "ctrl+shift+tab"), Some(PrevPane));
-        assert_eq!(g(false, "alt+3"), Some(GotoWorkspace(3)));
-        assert_eq!(g(false, "ctrl+3"), None, "ctrl+digit is no longer bound");
+        assert_eq!(g(false, "alt+3"), Some(GotoPane(3)), "alt+digit jumps to a pane");
+        assert_eq!(g(false, "ctrl+3"), Some(GotoWorkspace(3)), "ctrl+digit jumps to a workspace");
         // Keys GNOME Terminal and similar emulators pass through to programs.
         assert_eq!(g(false, "alt+left"), Some(FocusLeft));
         assert_eq!(g(false, "alt+down"), Some(FocusDown));
         assert_eq!(g(false, "alt+pagedown"), Some(NextPane));
         assert_eq!(g(false, "alt+pageup"), Some(PrevPane));
-        assert_eq!(g(true, "3"), Some(GotoWorkspace(3)));
+        assert_eq!(g(true, "3"), Some(GotoWorkspace(3)), "prefix+digit is the workspace fallback");
         assert_eq!(g(true, "x"), Some(ClosePane));
     }
 
