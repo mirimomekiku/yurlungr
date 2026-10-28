@@ -22,7 +22,7 @@ pub fn load(path: &Path, limit: usize) -> Result<Vec<GraphRow>> {
 
     let mut decorations: HashMap<Oid, Vec<String>> = HashMap::new();
     for r in repo.references()?.flatten() {
-        if let (Some(name), Ok(commit)) = (r.shorthand(), r.peel_to_commit()) {
+        if let (Ok(name), Ok(commit)) = (r.shorthand(), r.peel_to_commit()) {
             decorations.entry(commit.id()).or_default().push(name.to_string());
         }
     }
@@ -67,7 +67,7 @@ pub fn load(path: &Path, limit: usize) -> Result<Vec<GraphRow>> {
         rows.push(GraphRow {
             graph,
             id: id.to_string()[..7].to_string(),
-            summary: commit.summary().unwrap_or("").to_string(),
+            summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
             author: commit.author().name().unwrap_or("").to_string(),
             refs: decorations.get(&id).cloned().unwrap_or_default(),
         });

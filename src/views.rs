@@ -68,7 +68,8 @@ impl GraphView {
     }
 
     pub fn scroll(&mut self, delta: isize) {
-        step(&mut self.state, self.len(), delta);
+        let len = self.len();
+        step(&mut self.state, len, delta);
     }
 
     pub fn select(&mut self, idx: usize) {
