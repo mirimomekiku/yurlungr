@@ -98,13 +98,15 @@ pub struct Keybinds {
     scroll: usize,
     capture: Option<Capture>,
     message: Option<String>,
+    /// The last key press that reached the app, to diagnose keys a terminal swallows.
+    last_key: Option<String>,
 }
 
 impl Keybinds {
     pub fn new() -> Self {
         let mut rows = vec![Row::Prefix];
         rows.extend(Action::all().into_iter().map(Row::Action));
-        Self { rows, selected: 0, scroll: 0, capture: None, message: None }
+        Self { rows, selected: 0, scroll: 0, capture: None, message: None, last_key: None }
     }
 
     fn step(&mut self, delta: isize) {
@@ -113,6 +115,7 @@ impl Keybinds {
     }
 
     fn key(&mut self, app: &mut App, key: KeyEvent) -> bool {
+        self.last_key = Some(KeyCombo::from_event(key).format());
         if let Some(mode) = self.capture.take() {
             if key.code == KeyCode::Esc {
                 self.message = Some("cancelled".into());
@@ -248,7 +251,15 @@ pub fn draw_keybinds(f: &mut Frame, d: &mut Keybinds, th: &Theme, keymap: &Keyma
         )),
         (None, Some(m)) => Line::from(Span::styled(format!(" {m}"), Style::new().fg(th.marker))),
         (None, None) => Line::from(Span::styled(
-            format!(" prefix = {}; keys outside the prefix are 'direct'", keymap.prefix.format()),
+            match &d.last_key {
+                Some(k) => format!(
+                    " last key received: {k}  (a key that never shows up here is intercepted by your terminal)"
+                ),
+                None => format!(
+                    " prefix = {}; press any key to see what your terminal sends",
+                    keymap.prefix.format()
+                ),
+            },
             Style::new().fg(th.dim),
         )),
     };

@@ -446,12 +446,12 @@ impl Action {
             OpenFiles => &["prefix f"],
             ClosePane => &["prefix x"],
             ZoomPane => &["prefix z"],
-            NextPane => &["ctrl+tab", "prefix o", "prefix tab"],
-            PrevPane => &["ctrl+backtab", "prefix O", "prefix backtab"],
-            FocusLeft => &["prefix h", "prefix left"],
-            FocusRight => &["prefix l", "prefix right"],
-            FocusUp => &["prefix k", "prefix up"],
-            FocusDown => &["prefix j", "prefix down"],
+            NextPane => &["alt+pagedown", "ctrl+tab", "prefix o", "prefix tab"],
+            PrevPane => &["alt+pageup", "ctrl+backtab", "prefix O", "prefix backtab"],
+            FocusLeft => &["alt+left", "prefix h", "prefix left"],
+            FocusRight => &["alt+right", "prefix l", "prefix right"],
+            FocusUp => &["alt+up", "prefix k", "prefix up"],
+            FocusDown => &["alt+down", "prefix j", "prefix down"],
             ResizeLeft => &["prefix H"],
             ResizeRight => &["prefix L"],
             ResizeUp => &["prefix K"],
@@ -702,6 +702,11 @@ mod tests {
         assert_eq!(g(false, "ctrl+shift+tab"), Some(PrevPane));
         assert_eq!(g(false, "alt+3"), Some(GotoPane(3)));
         assert_eq!(g(false, "ctrl+3"), None, "ctrl+digit is no longer bound");
+        // Keys GNOME Terminal and similar emulators pass through to programs.
+        assert_eq!(g(false, "alt+left"), Some(FocusLeft));
+        assert_eq!(g(false, "alt+down"), Some(FocusDown));
+        assert_eq!(g(false, "alt+pagedown"), Some(NextPane));
+        assert_eq!(g(false, "alt+pageup"), Some(PrevPane));
         assert_eq!(g(true, "3"), Some(GotoPane(3)));
         assert_eq!(g(true, "x"), Some(ClosePane));
     }
