@@ -8,6 +8,7 @@ mod keys;
 mod layout;
 mod menu;
 mod mouse;
+mod onboarding;
 mod proto;
 mod server;
 mod terminal;
@@ -62,6 +63,12 @@ enum Cmd {
         #[arg(value_enum)]
         agent: Option<integration::Agent>,
     },
+    /// Find installed coding agents and offer to install status hooks.
+    Setup {
+        /// Install into every detected agent without asking.
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -78,7 +85,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::Integration { action, agent }) => integration::run(action, agent),
+        Some(Cmd::Setup { yes }) => onboarding::run(yes),
         None => {
+            if onboarding::needed() {
+                if let Err(e) = onboarding::run(false) {
+                    eprintln!("setup skipped: {e:#}");
+                }
+            }
             let root = match cli.path {
                 Some(p) => p.canonicalize()?,
                 None => env::current_dir()?,
