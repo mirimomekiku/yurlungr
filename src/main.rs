@@ -1,9 +1,11 @@
 mod app;
 mod client;
+mod config;
 mod file_browser;
 mod git_graph;
 mod hook;
 mod integration;
+mod keymap;
 mod keys;
 mod layout;
 mod menu;
@@ -12,6 +14,7 @@ mod onboarding;
 mod proto;
 mod server;
 mod terminal;
+mod theme;
 mod ui;
 mod views;
 
