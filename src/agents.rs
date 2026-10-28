@@ -57,6 +57,7 @@ fn by_name(name: &str) -> Option<&'static str> {
 /// The agent running as `args` (a full command line), if it is a known one.
 /// Only the program itself, or the script handed to a runtime, is considered:
 /// `cat claude` and `vim codex.md` are not agents.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn detect(args: &[String]) -> Option<&'static str> {
     let first = args.first()?;
     let program = base(first);
@@ -88,6 +89,7 @@ pub fn detect(args: &[String]) -> Option<&'static str> {
 }
 
 /// The command line of a process, or `None` where it cannot be read.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn command_line(pid: i64) -> Option<Vec<String>> {
     if pid <= 0 {
         return None;

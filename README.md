@@ -145,7 +145,7 @@ which files it changed.
   close and switch from the sidebar, the menu, or the keyboard.
 - **An agents list.** Agents are found by looking at what is running in each pane (`claude`,
   `codex`, `opencode`, `gemini`, `qwen`, `kimi`, `droid`, `aider` and more), so they show up with
-  no setup. States are **working**, **blocked** (waiting for you), **done** (finished while you were
+  no setup (on Windows an agent appears once its hooks report in, since a pty's foreground process can't be inspected there). States are **working**, **blocked** (waiting for you), **done** (finished while you were
   looking elsewhere) and **idle**. Install hooks for exact state (below).
 - **Splits.** `Ctrl+Left`, `Ctrl+Right` and `Ctrl+Down` split the focused pane. Drag the dividers
   to resize; right-click for a menu.

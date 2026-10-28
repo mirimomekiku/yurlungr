@@ -231,11 +231,16 @@ impl Terminal {
             return;
         }
         self.last_probe = Instant::now();
-        self.detected = self
-            .master
-            .process_group_leader()
-            .and_then(|pid| agents::command_line(i64::from(pid)))
-            .and_then(|args| agents::detect(&args));
+        // Asking a pty for its foreground process is Unix-only. Elsewhere agents
+        // are still listed when their hooks report in.
+        #[cfg(unix)]
+        {
+            self.detected = self
+                .master
+                .process_group_leader()
+                .and_then(|pid| agents::command_line(i64::from(pid)))
+                .and_then(|args| agents::detect(&args));
+        }
     }
 
     pub fn status(&self) -> Status {
