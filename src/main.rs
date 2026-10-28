@@ -14,6 +14,7 @@ mod mouse;
 mod onboarding;
 mod proto;
 mod server;
+mod settings;
 mod terminal;
 mod theme;
 mod ui;
