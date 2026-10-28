@@ -22,6 +22,7 @@ pub enum Overlay {
     Keybinds(Keybinds),
     Settings(SettingsDialog),
     Themes(ThemePicker),
+    Name(NameInput),
 }
 
 impl Overlay {
@@ -31,6 +32,7 @@ impl Overlay {
             Overlay::Keybinds(d) => d.key(app, key),
             Overlay::Settings(d) => d.key(app, key),
             Overlay::Themes(d) => d.key(app, key),
+            Overlay::Name(d) => d.key(app, key),
         }
     }
 
@@ -42,7 +44,7 @@ impl Overlay {
                 d.scroll = (d.scroll as isize + delta).max(0) as usize;
                 d.follow = false;
             }
-            Overlay::Themes(_) => {}
+            Overlay::Themes(_) | Overlay::Name(_) => {}
         }
     }
 }
@@ -492,5 +494,66 @@ pub fn draw(f: &mut Frame, overlay: &mut Overlay, th: &Theme, keymap: &Keymap) {
         Overlay::Keybinds(d) => draw_keybinds(f, d, th, keymap),
         Overlay::Settings(d) => draw_settings(f, d, th),
         Overlay::Themes(d) => draw_themes(f, d, th),
+        Overlay::Name(d) => draw_name(f, d, th),
     }
+}
+
+// ---- rename workspace --------------------------------------------------------
+
+pub struct NameInput {
+    /// Index of the workspace being renamed.
+    ws: usize,
+    text: String,
+    error: Option<String>,
+}
+
+impl NameInput {
+    pub fn new(ws: usize, current: &str) -> Self {
+        Self { ws, text: current.to_string(), error: None }
+    }
+
+    fn key(&mut self, app: &mut App, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => return false,
+            KeyCode::Enter => match app.rename_workspace(self.ws, &self.text) {
+                Ok(()) => return false,
+                Err(e) => self.error = Some(e),
+            },
+            KeyCode::Backspace => {
+                self.text.pop();
+                self.error = None;
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.text.push(c);
+                self.error = None;
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+pub fn draw_name(f: &mut Frame, d: &NameInput, th: &Theme) {
+    let area = centered(f.area(), 54, 6);
+    let inner = frame(f, area, "Rename workspace", th);
+    let [input, error, hint] =
+        Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Length(1)])
+            .areas(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(format!(" {}", d.text)),
+            Span::styled("▏", Style::new().fg(th.marker)),
+        ]))
+        .wrap(Wrap { trim: false }),
+        input,
+    );
+    if let Some(e) = &d.error {
+        f.render_widget(Paragraph::new(format!(" {e}")).style(Style::new().fg(th.danger)), error);
+    }
+    f.render_widget(
+        Paragraph::new(" Enter save · Esc cancel").style(Style::new().fg(th.dim)),
+        hint,
+    );
 }

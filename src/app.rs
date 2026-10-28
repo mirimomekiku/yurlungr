@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     time::{Duration, Instant, SystemTime},
@@ -21,12 +21,13 @@ use crate::{
     layout::{Dir, Divider, Node, PaneId},
     menu::{Menu, MenuAction},
     mouse,
-    overlay::{Keybinds, Overlay, SettingsDialog, ThemePicker},
+    overlay::{Keybinds, NameInput, Overlay, SettingsDialog, ThemePicker},
     proto::ReportState,
     settings,
     terminal::{Status, Terminal},
     theme::{self, Theme},
-    views::{Clip, FilesAct, FilesView, GraphView, Pane},
+    views::{Clip, FilesAct, FilesView, GraphAct, GraphView, Pane},
+    workspace::{self, AgentState, SavedWorkspace, Workspace},
 };
 
 /// How often the config file is checked for outside edits.
@@ -49,12 +50,24 @@ fn kind_of(p: &Pane) -> Kind {
     }
 }
 
-/// A clickable region of the dock.
+/// A clickable region of the sidebar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DockHit {
-    Pane(PaneId),
-    New,
+    /// A workspace in the spaces list (index).
+    Workspace(usize),
+    /// An agent in the agents list: focus its pane.
+    Agent(PaneId),
+    NewWorkspace,
     Menu,
+}
+
+/// One row of the agents list.
+pub struct AgentEntry {
+    pub pane: PaneId,
+    /// Index of the workspace the pane lives in.
+    pub workspace: usize,
+    pub name: String,
+    pub state: AgentState,
 }
 
 /// What is written to disk so a new server can rebuild the layout. Processes
@@ -62,9 +75,16 @@ pub enum DockHit {
 #[derive(Serialize, Deserialize)]
 struct Saved {
     root: PathBuf,
-    tree: Node,
     kinds: Vec<(PaneId, Kind)>,
     next_id: PaneId,
+    #[serde(default)]
+    workspaces: Vec<SavedWorkspace>,
+    #[serde(default)]
+    active: usize,
+    /// Layouts saved before workspaces existed held a single tree and focus.
+    #[serde(default)]
+    tree: Option<Node>,
+    #[serde(default)]
     focus: PaneId,
 }
 
@@ -117,10 +137,19 @@ pub struct App {
     root: PathBuf,
     session: String,
     pub panes: HashMap<PaneId, Pane>,
+    /// All workspaces. The entry for the active one is stale: its live layout
+    /// is `tree`, `focus` and `zoomed` below (see `store`).
+    pub workspaces: Vec<Workspace>,
+    pub active: usize,
     tree: Node,
     next_id: PaneId,
     pub focus: PaneId,
     pub zoomed: Option<PaneId>,
+    /// Agent panes that finished while another pane had focus.
+    done: HashSet<PaneId>,
+    prev_state: HashMap<PaneId, Status>,
+    /// A workspace whose close was requested once already (needs confirming).
+    pending_ws_close: Option<usize>,
     /// True after the prefix key until the next key press.
     pub prefix: bool,
     pub menu: Option<Menu>,
@@ -162,13 +191,24 @@ impl App {
             theme,
             config_mtime: config::modified(),
             config_checked: Instant::now(),
-            root,
+            root: root.clone(),
             session: session.to_string(),
             panes: HashMap::new(),
+            workspaces: vec![Workspace {
+                name: workspace::default_name(&root, &[]),
+                root: root.clone(),
+                tree: Node::Leaf(0),
+                focus: 0,
+                zoomed: None,
+            }],
+            active: 0,
             tree: Node::Leaf(0),
             next_id: 1,
             focus: 0,
             zoomed: None,
+            done: HashSet::new(),
+            prev_state: HashMap::new(),
+            pending_ws_close: None,
             prefix: false,
             menu: None,
             notice: None,
@@ -203,55 +243,93 @@ impl App {
     fn restore(layout_file: &PathBuf, session: &str) -> Option<Self> {
         let saved: Saved = serde_json::from_str(&fs::read_to_string(layout_file).ok()?).ok()?;
         let mut app = Self::blank(saved.root.clone(), Some(layout_file.clone()), session);
-        app.tree = saved.tree;
         app.next_id = saved.next_id;
-        app.focus = saved.focus;
 
-        let mut tree_ids = Vec::new();
-        app.tree.ids(&mut tree_ids);
-        if tree_ids.iter().any(|id| !saved.kinds.iter().any(|(k, _)| k == id)) {
-            return None;
+        let mut saved_workspaces = saved.workspaces;
+        if saved_workspaces.is_empty() {
+            saved_workspaces.push(SavedWorkspace {
+                name: workspace::default_name(&saved.root, &[]),
+                root: saved.root.clone(),
+                tree: saved.tree?,
+                focus: saved.focus,
+            });
         }
-        for (id, kind) in saved.kinds {
-            let pane = match kind {
-                Kind::Terminal => Terminal::spawn(&saved.root, 24, 80, &pane_env(session, id))
-                    .ok()
-                    .map(Pane::Terminal),
-                Kind::Graph => Some(Pane::Graph(GraphView::new(&saved.root))),
-                Kind::Files => FilesView::new(saved.root.clone()).ok().map(Pane::Files),
-                Kind::Editor(path) => EditorView::open(&path).ok().map(Pane::Editor),
-            };
-            match pane {
-                Some(p) => {
-                    app.panes.insert(id, p);
-                }
-                None => {
-                    if tree_ids.len() > 1 {
-                        app.tree.remove(id);
+        let kinds: HashMap<PaneId, Kind> = saved.kinds.into_iter().collect();
+        for w in &saved_workspaces {
+            let mut ids = Vec::new();
+            w.tree.ids(&mut ids);
+            if ids.iter().any(|id| !kinds.contains_key(id)) {
+                return None;
+            }
+        }
+
+        let mut restored = Vec::new();
+        for w in saved_workspaces {
+            let mut tree = w.tree;
+            let mut ids = Vec::new();
+            tree.ids(&mut ids);
+            let mut alive = ids.len();
+            for id in ids {
+                let pane = match kinds[&id].clone() {
+                    Kind::Terminal => Terminal::spawn(&w.root, 24, 80, &pane_env(session, id))
+                        .ok()
+                        .map(Pane::Terminal),
+                    Kind::Graph => Some(Pane::Graph(Box::new(GraphView::new(&w.root)))),
+                    Kind::Files => FilesView::new(w.root.clone()).ok().map(Pane::Files),
+                    Kind::Editor(path) => EditorView::open(&path).ok().map(Pane::Editor),
+                };
+                match pane {
+                    Some(p) => {
+                        app.panes.insert(id, p);
+                    }
+                    None => {
+                        // Keep at least one pane; a workspace with none is dropped below.
+                        if alive > 1 {
+                            tree.remove(id);
+                        }
+                        alive -= 1;
                     }
                 }
             }
+            let mut left = Vec::new();
+            tree.ids(&mut left);
+            left.retain(|id| app.panes.contains_key(id));
+            let Some(&first) = left.first() else { continue };
+            let focus = if left.contains(&w.focus) { w.focus } else { first };
+            restored.push(Workspace { name: w.name, root: w.root, tree, focus, zoomed: None });
         }
-        if app.panes.is_empty() {
+        if restored.is_empty() {
             return None;
         }
-        if !app.panes.contains_key(&app.focus) {
-            app.focus = *app.panes.keys().next()?;
-        }
+        app.active = saved.active.min(restored.len() - 1);
+        app.workspaces = restored;
+        app.load_active();
         Some(app)
     }
 
     /// Write the layout to disk when it changed.
     pub fn persist(&mut self) {
+        self.store();
         let Some(path) = &self.layout_file else { return };
         let mut kinds: Vec<(PaneId, Kind)> =
             self.panes.iter().map(|(id, p)| (*id, kind_of(p))).collect();
         kinds.sort_by_key(|(id, _)| *id);
         let saved = Saved {
             root: self.root.clone(),
-            tree: self.tree.clone(),
             kinds,
             next_id: self.next_id,
+            workspaces: self
+                .workspaces
+                .iter()
+                .map(|w| SavedWorkspace {
+                    name: w.name.clone(),
+                    root: w.root.clone(),
+                    tree: w.tree.clone(),
+                    focus: w.focus,
+                })
+                .collect(),
+            active: self.active,
+            tree: None,
             focus: self.focus,
         };
         if let Ok(json) = serde_json::to_string(&saved) {
@@ -305,6 +383,253 @@ impl App {
         }
     }
 
+    // ---- workspaces ------------------------------------------------------
+
+    /// Copy the live layout into the active workspace's stored entry.
+    fn store(&mut self) {
+        if let Some(w) = self.workspaces.get_mut(self.active) {
+            w.tree = self.tree.clone();
+            w.focus = self.focus;
+            w.zoomed = self.zoomed;
+        }
+    }
+
+    /// Make the active workspace's stored layout the live one.
+    fn load_active(&mut self) {
+        let w = &self.workspaces[self.active];
+        self.tree = w.tree.clone();
+        self.focus = w.focus;
+        self.zoomed = w.zoomed;
+    }
+
+    /// Forget transient state that belongs to the workspace being left.
+    fn reset_interaction(&mut self) {
+        self.sel = None;
+        self.selecting = None;
+        self.drag = None;
+        self.rects.clear();
+        self.dividers.clear();
+        self.pending_close = None;
+        self.pending_ws_close = None;
+    }
+
+    pub fn ws_root(&self) -> PathBuf {
+        self.workspaces[self.active].root.clone()
+    }
+
+    /// Pane ids of workspace `i`, in layout order.
+    pub fn ws_ids(&self, i: usize) -> Vec<PaneId> {
+        let mut ids = Vec::new();
+        match self.workspaces.get(i) {
+            Some(_) if i == self.active => self.tree.ids(&mut ids),
+            Some(w) => w.tree.ids(&mut ids),
+            None => {}
+        }
+        ids
+    }
+
+    fn workspace_of(&self, pane: PaneId) -> Option<usize> {
+        (0..self.workspaces.len()).find(|&i| self.ws_ids(i).contains(&pane))
+    }
+
+    pub fn switch_workspace(&mut self, i: usize) {
+        if i >= self.workspaces.len() || i == self.active {
+            return;
+        }
+        self.store();
+        self.active = i;
+        self.load_active();
+        self.reset_interaction();
+    }
+
+    fn goto_workspace(&mut self, n: u8) {
+        let i = n as usize - 1;
+        if i < self.workspaces.len() {
+            self.switch_workspace(i);
+        } else {
+            self.notice = Some(format!("there is no workspace {n}"));
+        }
+    }
+
+    fn cycle_workspace(&mut self, back: bool) {
+        let n = self.workspaces.len();
+        self.switch_workspace((self.active + if back { n - 1 } else { 1 }) % n);
+    }
+
+    /// Focus a pane in any workspace, switching to that workspace first.
+    pub fn focus_pane(&mut self, id: PaneId) {
+        let Some(ws) = self.workspace_of(id) else { return };
+        self.switch_workspace(ws);
+        self.focus = id;
+        if self.zoomed.is_some() {
+            self.zoomed = Some(id);
+        }
+        self.sel = None;
+    }
+
+    /// Where a new workspace starts: the folder a file browser is showing, else
+    /// the current workspace's root.
+    fn suggested_root(&self) -> PathBuf {
+        match self.panes.get(&self.focus) {
+            Some(Pane::Files(v)) => v.fb.dir.clone(),
+            _ => self.ws_root(),
+        }
+    }
+
+    pub fn new_workspace(&mut self) {
+        let root = self.suggested_root();
+        let id = self.next_id;
+        let terminal = match Terminal::spawn(&root, 24, 80, &pane_env(&self.session, id)) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notice = Some(format!("failed to start shell: {e}"));
+                return;
+            }
+        };
+        self.next_id += 1;
+        self.store();
+        let names: Vec<&str> = self.workspaces.iter().map(|w| w.name.as_str()).collect();
+        let name = workspace::default_name(&root, &names);
+        self.panes.insert(id, Pane::Terminal(terminal));
+        self.workspaces.push(Workspace {
+            name,
+            root,
+            tree: Node::Leaf(id),
+            focus: id,
+            zoomed: None,
+        });
+        self.active = self.workspaces.len() - 1;
+        self.load_active();
+        self.reset_interaction();
+    }
+
+    /// Drop a workspace and every pane in it (their shells are killed).
+    fn remove_workspace(&mut self, i: usize) {
+        for id in self.ws_ids(i) {
+            self.panes.remove(&id);
+            self.done.remove(&id);
+            self.prev_state.remove(&id);
+        }
+        self.workspaces.remove(i);
+        if i == self.active {
+            self.active = i.min(self.workspaces.len() - 1);
+            self.load_active();
+            self.reset_interaction();
+        } else if i < self.active {
+            self.active -= 1;
+        }
+    }
+
+    /// Close a workspace, asking for the request to be repeated first because
+    /// it ends every shell in it.
+    fn request_close_workspace(&mut self, i: usize) {
+        if self.workspaces.len() <= 1 {
+            self.notice =
+                Some("this is the only workspace; detach or quit the session instead".into());
+            return;
+        }
+        if self.pending_ws_close != Some(i) {
+            self.pending_ws_close = Some(i);
+            let w = &self.workspaces[i];
+            self.notice = Some(format!(
+                "close workspace '{}' and its {} panes? repeat to confirm",
+                w.name,
+                self.ws_ids(i).len()
+            ));
+            return;
+        }
+        self.pending_ws_close = None;
+        self.remove_workspace(i);
+    }
+
+    pub fn rename_workspace(&mut self, i: usize, raw: &str) -> Result<(), String> {
+        let name = workspace::clean_name(raw).map_err(str::to_string)?;
+        let taken = self.workspaces.iter().enumerate().any(|(j, w)| j != i && w.name == name);
+        if taken {
+            return Err(format!("another workspace is already called '{name}'"));
+        }
+        match self.workspaces.get_mut(i) {
+            Some(w) => {
+                w.name = name;
+                Ok(())
+            }
+            None => Err("that workspace no longer exists".to_string()),
+        }
+    }
+
+    // ---- agents ----------------------------------------------------------
+
+    /// What the agent in `pane` is doing; `None` if the pane has no agent.
+    pub fn agent_state(&self, pane: PaneId) -> Option<AgentState> {
+        let Some(Pane::Terminal(t)) = self.panes.get(&pane) else { return None };
+        t.agent()?;
+        Some(match t.status() {
+            Status::Blocked => AgentState::Blocked,
+            Status::Working => AgentState::Working,
+            Status::Idle if self.done.contains(&pane) => AgentState::Done,
+            Status::Idle => AgentState::Idle,
+        })
+    }
+
+    /// Every agent in every workspace, in workspace then layout order.
+    pub fn agents(&self) -> Vec<AgentEntry> {
+        let mut out = Vec::new();
+        for ws in 0..self.workspaces.len() {
+            for pane in self.ws_ids(ws) {
+                let (Some(state), Some(Pane::Terminal(t))) =
+                    (self.agent_state(pane), self.panes.get(&pane))
+                else {
+                    continue;
+                };
+                let name = t.agent().unwrap_or("agent").to_string();
+                out.push(AgentEntry { pane, workspace: ws, name, state });
+            }
+        }
+        out
+    }
+
+    /// The most urgent state among a workspace's agents; `None` if it has none.
+    pub fn workspace_state(&self, ws: usize) -> Option<AgentState> {
+        AgentState::rollup(self.ws_ids(ws).into_iter().filter_map(|id| self.agent_state(id)))
+    }
+
+    /// Called every tick: notice new agents, and mark an agent that finished
+    /// out of sight as done until its pane is looked at.
+    pub fn track_agents(&mut self) {
+        for pane in self.panes.values_mut() {
+            if let Pane::Terminal(t) = pane {
+                t.probe_agent();
+            }
+        }
+        let current: Vec<(PaneId, Option<Status>)> = self
+            .panes
+            .iter()
+            .filter_map(|(id, p)| match p {
+                Pane::Terminal(t) => Some((*id, t.agent().map(|_| t.status()))),
+                _ => None,
+            })
+            .collect();
+        for (id, status) in current {
+            let Some(status) = status else {
+                self.prev_state.remove(&id);
+                self.done.remove(&id);
+                continue;
+            };
+            let before = self.prev_state.insert(id, status);
+            match status {
+                Status::Working => {
+                    self.done.remove(&id);
+                }
+                Status::Idle if before == Some(Status::Working) && id != self.focus => {
+                    self.done.insert(id);
+                }
+                _ => {}
+            }
+        }
+        // Looking at a pane is what clears "done".
+        self.done.remove(&self.focus);
+    }
+
     // ---- pane management -------------------------------------------------
 
     fn open(&mut self, kind: Kind, dir: Dir) {
@@ -315,18 +640,17 @@ impl App {
     /// (left or above) when `before` is set.
     fn open_at(&mut self, kind: Kind, dir: Dir, before: bool) {
         let id = self.next_id;
+        let root = self.ws_root();
         let pane = match kind {
-            Kind::Terminal => {
-                match Terminal::spawn(&self.root, 24, 80, &pane_env(&self.session, id)) {
-                    Ok(t) => Pane::Terminal(t),
-                    Err(e) => {
-                        self.notice = Some(format!("failed to start shell: {e}"));
-                        return;
-                    }
+            Kind::Terminal => match Terminal::spawn(&root, 24, 80, &pane_env(&self.session, id)) {
+                Ok(t) => Pane::Terminal(t),
+                Err(e) => {
+                    self.notice = Some(format!("failed to start shell: {e}"));
+                    return;
                 }
-            }
-            Kind::Graph => Pane::Graph(GraphView::new(&self.root)),
-            Kind::Files => match FilesView::new(self.root.clone()) {
+            },
+            Kind::Graph => Pane::Graph(Box::new(GraphView::new(&root))),
+            Kind::Files => match FilesView::new(root.clone()) {
                 Ok(v) => Pane::Files(v),
                 Err(e) => {
                     self.notice = Some(format!("failed to open files: {e}"));
@@ -350,14 +674,41 @@ impl App {
         }
     }
 
-    /// Show `path` in an editor pane, reusing one that already has it open.
+    /// Show `path` in the workspace's single file viewer. If a viewer is already
+    /// open here it is reused for the new file instead of adding another pane,
+    /// unless it holds unsaved changes.
     fn open_file(&mut self, path: PathBuf, edit: bool) {
         let existing = self
-            .panes
-            .iter()
-            .find_map(|(id, p)| matches!(p, Pane::Editor(v) if v.path == path).then_some(*id));
+            .pane_order()
+            .into_iter()
+            .find(|id| matches!(self.panes.get(id), Some(Pane::Editor(_))));
         match existing {
-            Some(id) => self.focus = id,
+            Some(id) => {
+                let Some(Pane::Editor(current)) = self.panes.get(&id) else { return };
+                if current.path != path {
+                    if current.dirty {
+                        self.notice = Some(format!(
+                            "{} has unsaved changes: save it, or close it, before opening another file",
+                            current.name()
+                        ));
+                        self.focus = id;
+                        return;
+                    }
+                    match EditorView::open(&path) {
+                        Ok(v) => {
+                            self.panes.insert(id, Pane::Editor(v));
+                        }
+                        Err(e) => {
+                            self.notice = Some(format!("cannot open {}: {e}", path.display()));
+                            return;
+                        }
+                    }
+                }
+                self.focus = id;
+                if self.zoomed.is_some() {
+                    self.zoomed = Some(id);
+                }
+            }
             None => self.open(Kind::Editor(path), Dir::Horizontal),
         }
         if let Some(Pane::Editor(v)) = self.panes.get_mut(&self.focus) {
@@ -386,25 +737,46 @@ impl App {
         ids
     }
 
+    /// Close a pane wherever it lives. Closing a workspace's last pane closes
+    /// the workspace; closing the last pane of the last workspace ends the session.
     fn close(&mut self, id: PaneId) {
-        let mut ids = Vec::new();
-        self.tree.ids(&mut ids);
-        if ids.len() <= 1 {
-            self.quit = true;
+        let Some(ws) = self.workspace_of(id) else {
+            self.panes.remove(&id);
+            return;
+        };
+        if self.ws_ids(ws).len() <= 1 {
+            if self.workspaces.len() <= 1 {
+                self.quit = true;
+            } else {
+                self.remove_workspace(ws);
+            }
             return;
         }
-        self.tree.remove(id);
         self.panes.remove(&id);
-        if self.zoomed == Some(id) {
-            self.zoomed = None;
-        }
-        if self.sel.as_ref().is_some_and(|s| s.pane == id) {
-            self.sel = None;
-        }
-        if self.focus == id {
-            let mut ids = Vec::new();
-            self.tree.ids(&mut ids);
-            self.focus = ids.first().copied().unwrap_or(0);
+        self.done.remove(&id);
+        self.prev_state.remove(&id);
+        if ws == self.active {
+            self.tree.remove(id);
+            if self.zoomed == Some(id) {
+                self.zoomed = None;
+            }
+            if self.sel.as_ref().is_some_and(|s| s.pane == id) {
+                self.sel = None;
+            }
+            if self.focus == id {
+                self.focus = self.pane_order().first().copied().unwrap_or(0);
+            }
+        } else {
+            let w = &mut self.workspaces[ws];
+            w.tree.remove(id);
+            if w.zoomed == Some(id) {
+                w.zoomed = None;
+            }
+            if w.focus == id {
+                let mut ids = Vec::new();
+                w.tree.ids(&mut ids);
+                w.focus = ids.first().copied().unwrap_or(0);
+            }
         }
     }
 
@@ -436,20 +808,6 @@ impl App {
                 self.zoomed = Some(self.focus);
             }
             self.sel = None;
-        }
-    }
-
-    /// Jump to the n-th pane (1-based, in dock order).
-    fn goto_pane(&mut self, n: u8) {
-        match self.pane_order().get(n as usize - 1) {
-            Some(&id) => {
-                self.focus = id;
-                if self.zoomed.is_some() {
-                    self.zoomed = Some(id);
-                }
-                self.sel = None;
-            }
-            None => self.notice = Some(format!("there is no pane {n}")),
         }
     }
 
@@ -551,6 +909,7 @@ impl App {
         let is_prefix_key = combo == self.config.keymap.prefix;
         if !self.prefix && !is_prefix_key {
             self.pending_close = None;
+            self.pending_ws_close = None;
         }
         let scope = self.focus_scope();
 
@@ -582,7 +941,14 @@ impl App {
                 t.reset_scroll();
                 t.write(&key_bytes(key, app_cursor));
             }
-            Some(Pane::Graph(v)) => v.key(key.code),
+            Some(Pane::Graph(v)) => match v.key(key.code) {
+                GraphAct::None => {}
+                GraphAct::Msg(m) => self.notice = Some(m),
+                GraphAct::Copy(text) => {
+                    self.notice = Some(format!("copied commit id {}", &text[..text.len().min(12)]));
+                    self.outbox.push(STANDARD.encode(text.as_bytes()));
+                }
+            },
             Some(Pane::Files(v)) => {
                 // While a prompt is open every key is text, never a command.
                 let cmd = if v.prompt.is_some() {
@@ -671,7 +1037,15 @@ impl App {
             Action::OpenThemes => {
                 self.overlay = Some(Overlay::Themes(ThemePicker::new(&self.config.theme)));
             }
-            Action::GotoPane(n) => self.goto_pane(n),
+            Action::NewWorkspace => self.new_workspace(),
+            Action::CloseWorkspace => self.request_close_workspace(self.active),
+            Action::RenameWorkspace => {
+                let name = self.workspaces[self.active].name.clone();
+                self.overlay = Some(Overlay::Name(NameInput::new(self.active, &name)));
+            }
+            Action::NextWorkspace => self.cycle_workspace(false),
+            Action::PrevWorkspace => self.cycle_workspace(true),
+            Action::GotoWorkspace(n) => self.goto_workspace(n),
             // File browser and editor actions are resolved against the focused pane.
             _ => {}
         }
@@ -736,7 +1110,19 @@ impl App {
     }
 
     fn run_menu(&mut self, target: PaneId, action: MenuAction) {
-        self.focus = target;
+        // The workspace menu's target is a workspace index, not a pane.
+        match action {
+            MenuAction::NewWorkspace => return self.new_workspace(),
+            MenuAction::RenameWorkspace => {
+                if let Some(w) = self.workspaces.get(target) {
+                    self.overlay = Some(Overlay::Name(NameInput::new(target, &w.name)));
+                }
+                return;
+            }
+            MenuAction::CloseWorkspace => return self.request_close_workspace(target),
+            _ => {}
+        }
+        self.focus_pane(target);
         match action {
             MenuAction::SplitRight => self.open(Kind::Terminal, Dir::Horizontal),
             MenuAction::SplitDown => self.open(Kind::Terminal, Dir::Vertical),
@@ -749,6 +1135,8 @@ impl App {
             MenuAction::Themes => self.run_action(Action::OpenThemes),
             MenuAction::Detach => self.detach = true,
             MenuAction::QuitSession => self.quit = true,
+            MenuAction::NewWorkspace | MenuAction::RenameWorkspace | MenuAction::CloseWorkspace => {
+            }
         }
     }
 
@@ -810,9 +1198,15 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.menu = None;
-                if let Some(DockHit::Pane(id)) = self.dock_at(x, y) {
-                    self.focus = id;
-                    self.menu = Some(Menu::new(x, y, id));
+                if let Some(hit) = self.dock_at(x, y) {
+                    match hit {
+                        DockHit::Workspace(i) => self.menu = Some(Menu::workspace(x, y, i)),
+                        DockHit::Agent(id) => {
+                            self.focus_pane(id);
+                            self.menu = Some(Menu::new(x, y, id));
+                        }
+                        DockHit::NewWorkspace | DockHit::Menu => {}
+                    }
                 } else if let Some(id) = self.pane_at(x, y) {
                     self.focus = id;
                     self.menu = Some(Menu::new(x, y, id));
@@ -828,13 +1222,9 @@ impl App {
                 }
                 if let Some(hit) = self.dock_at(x, y) {
                     match hit {
-                        DockHit::Pane(id) => {
-                            self.focus = id;
-                            if self.zoomed.is_some() {
-                                self.zoomed = Some(id);
-                            }
-                        }
-                        DockHit::New => self.open(Kind::Terminal, Dir::Horizontal),
+                        DockHit::Workspace(i) => self.switch_workspace(i),
+                        DockHit::Agent(id) => self.focus_pane(id),
+                        DockHit::NewWorkspace => self.new_workspace(),
                         DockHit::Menu => self.open_app_menu(),
                     }
                     return Ok(());
@@ -895,7 +1285,13 @@ impl App {
                 self.sel = None;
                 t.scroll(dir * 3);
             }
-            Some(Pane::Graph(v)) => v.scroll(-dir),
+            Some(Pane::Graph(v)) => {
+                if contains(v.detail_area, x, y) {
+                    v.scroll_detail(-dir * 3);
+                } else {
+                    v.scroll(-dir);
+                }
+            }
             Some(Pane::Files(v)) => v.scroll(-dir),
             Some(Pane::Editor(v)) => v.scroll_view(-dir * 3),
             None => {}
@@ -918,8 +1314,9 @@ impl App {
                 }
             }
             Some(Pane::Graph(v)) => {
-                if let Some(row) = y.checked_sub(area.y) {
-                    let idx = v.state.offset() + row as usize;
+                // Only the commit list is clickable; the detail panel below it is not.
+                if contains(v.list_area, x, y) {
+                    let idx = v.state.offset() + (y - v.list_area.y) as usize;
                     v.select(idx);
                 }
             }
@@ -956,5 +1353,313 @@ impl App {
         }
         self.outbox.push(STANDARD.encode(text.as_bytes()));
         self.notice = Some(format!("copied {} characters", text.chars().count()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{keymap::Action as KeyAction, proto::ReportState};
+
+    fn viewers(app: &App) -> Vec<&EditorView> {
+        app.panes
+            .values()
+            .filter_map(|p| if let Pane::Editor(v) = p { Some(v) } else { None })
+            .collect()
+    }
+
+    fn setup() -> (tempfile::TempDir, App, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        fs::write(&a, "alpha\n").unwrap();
+        fs::write(&b, "beta\n").unwrap();
+        let app = App::blank(dir.path().to_path_buf(), None, "test");
+        (dir, app, a, b)
+    }
+
+    #[test]
+    fn opening_another_file_reuses_the_single_viewer() {
+        let (_d, mut app, a, b) = setup();
+        app.open_file(a.clone(), false);
+        assert_eq!(viewers(&app).len(), 1);
+        assert_eq!(app.panes.len(), 1);
+
+        app.open_file(b.clone(), false);
+        assert_eq!(viewers(&app).len(), 1, "still one viewer");
+        assert_eq!(viewers(&app)[0].path, b, "now showing the new file");
+        assert_eq!(app.panes.len(), 1, "no extra pane was created");
+
+        app.open_file(b.clone(), true);
+        assert_eq!(viewers(&app).len(), 1, "reopening the same file is idempotent");
+        assert!(viewers(&app)[0].mode == Mode::Edit, "but can switch it to edit mode");
+    }
+
+    #[test]
+    fn a_viewer_with_unsaved_changes_is_never_replaced() {
+        let (_d, mut app, a, b) = setup();
+        app.open_file(a.clone(), true);
+        let id = app.focus;
+        if let Some(Pane::Editor(v)) = app.panes.get_mut(&id) {
+            v.paste("typed ");
+            assert!(v.dirty);
+        }
+        app.open_file(b, false);
+        assert_eq!(viewers(&app)[0].path, a, "kept the file being edited");
+        assert!(viewers(&app)[0].dirty);
+        assert!(app.notice.as_deref().is_some_and(|n| n.contains("unsaved")), "{:?}", app.notice);
+    }
+
+    #[test]
+    fn unreadable_file_leaves_the_viewer_alone() {
+        let (d, mut app, a, _b) = setup();
+        app.open_file(a.clone(), false);
+        let bin = d.path().join("bin");
+        fs::write(&bin, [0u8, 1, 2]).unwrap();
+        app.open_file(bin, false);
+        assert_eq!(viewers(&app)[0].path, a);
+        assert!(app.notice.as_deref().is_some_and(|n| n.contains("binary")), "{:?}", app.notice);
+    }
+
+    /// An app whose first pane is a git graph, so no shell is needed.
+    fn light_app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::blank(dir.path().to_path_buf(), None, "test");
+        app.panes.insert(0, Pane::Graph(Box::new(GraphView::new(dir.path()))));
+        (dir, app)
+    }
+
+    #[test]
+    fn workspaces_keep_independent_layouts() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        assert_eq!(app.workspaces.len(), 2);
+        assert_eq!(app.active, 1);
+        assert_eq!(app.pane_order().len(), 1, "a new workspace starts with one pane");
+        let second_first = app.pane_order()[0];
+
+        app.run_action(KeyAction::SplitRight);
+        assert_eq!(app.pane_order().len(), 2);
+
+        app.switch_workspace(0);
+        assert_eq!(app.pane_order(), [0], "the first workspace is untouched");
+        assert_eq!(app.ws_ids(1).len(), 2, "the other one kept its split");
+
+        app.switch_workspace(1);
+        assert_eq!(app.pane_order().len(), 2);
+        assert_eq!(app.pane_order()[0], second_first);
+        assert_eq!(app.panes.len(), 3, "all panes live in one map with unique ids");
+    }
+
+    #[test]
+    fn closing_panes_and_workspaces() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.run_action(KeyAction::SplitRight);
+        let ids = app.pane_order();
+        app.switch_workspace(0);
+
+        // A pane in a workspace that is not showing.
+        app.close(ids[1]);
+        assert_eq!(app.ws_ids(1), [ids[0]]);
+        assert!(!app.panes.contains_key(&ids[1]));
+
+        // Its last pane takes the whole workspace with it.
+        app.close(ids[0]);
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(app.active, 0);
+        assert!(!app.quit);
+
+        // The very last pane ends the session.
+        app.close(0);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn closing_the_active_workspace_activates_a_neighbour() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.new_workspace();
+        assert_eq!((app.active, app.workspaces.len()), (2, 3));
+        app.request_close_workspace(2);
+        assert_eq!(app.workspaces.len(), 3, "the first request only asks for confirmation");
+        assert!(app.notice.as_deref().is_some_and(|n| n.contains("repeat to confirm")));
+        app.request_close_workspace(2);
+        assert_eq!((app.active, app.workspaces.len()), (1, 2));
+        assert_eq!(app.panes.len(), 2, "the closed workspace's shell is gone");
+        assert!(app.pane_order().iter().all(|id| app.panes.contains_key(id)));
+
+        app.request_close_workspace(0);
+        app.request_close_workspace(0);
+        assert_eq!(
+            (app.active, app.workspaces.len()),
+            (0, 1),
+            "indexes shift when an earlier one closes"
+        );
+
+        app.request_close_workspace(0);
+        assert!(
+            app.notice.as_deref().is_some_and(|n| n.contains("only workspace")),
+            "{:?}",
+            app.notice
+        );
+        assert_eq!(app.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn rename_validates_and_rejects_duplicates() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.rename_workspace(0, "  api  ").unwrap();
+        assert_eq!(app.workspaces[0].name, "api");
+        assert!(app.rename_workspace(1, "api").unwrap_err().contains("already"));
+        assert!(app.rename_workspace(1, "   ").is_err());
+        assert!(app.rename_workspace(1, "api").is_err());
+        app.rename_workspace(0, "api").unwrap(); // keeping its own name is fine
+        assert!(!app.workspaces[1].name.is_empty());
+    }
+
+    #[test]
+    fn new_workspaces_get_unique_default_names() {
+        let (_d, mut app) = light_app();
+        let base = app.workspaces[0].name.clone();
+        app.new_workspace();
+        app.new_workspace();
+        assert_eq!(app.workspaces[1].name, format!("{base} 2"));
+        assert_eq!(app.workspaces[2].name, format!("{base} 3"));
+    }
+
+    #[test]
+    fn jumping_between_workspaces() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.new_workspace();
+        app.run_action(KeyAction::GotoWorkspace(1));
+        assert_eq!(app.active, 0);
+        app.run_action(KeyAction::NextWorkspace);
+        assert_eq!(app.active, 1);
+        app.run_action(KeyAction::PrevWorkspace);
+        app.run_action(KeyAction::PrevWorkspace);
+        assert_eq!(app.active, 2, "previous wraps around");
+        app.run_action(KeyAction::GotoWorkspace(9));
+        assert_eq!(app.active, 2, "out of range keeps the workspace");
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn focusing_a_pane_in_another_workspace_switches_to_it() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        let there = app.pane_order()[0];
+        app.switch_workspace(0);
+        app.focus_pane(there);
+        assert_eq!((app.active, app.focus), (1, there));
+    }
+
+    fn set_agent(app: &mut App, pane: PaneId, state: ReportState) {
+        if let Some(Pane::Terminal(t)) = app.panes.get_mut(&pane) {
+            t.set_report("claude".to_string(), state);
+        }
+    }
+
+    #[test]
+    fn agents_are_listed_across_workspaces_with_rolled_up_state() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        let a = app.pane_order()[0];
+        app.run_action(KeyAction::SplitRight);
+        let b = app.pane_order()[1];
+        assert!(app.agents().is_empty(), "plain shells are not agents");
+        assert_eq!(app.workspace_state(1), None);
+
+        set_agent(&mut app, a, ReportState::Idle);
+        set_agent(&mut app, b, ReportState::Blocked);
+        app.switch_workspace(0);
+
+        let agents = app.agents();
+        assert_eq!(agents.len(), 2, "agents in other workspaces are listed too");
+        assert!(agents.iter().all(|e| e.workspace == 1 && e.name == "claude"));
+        assert_eq!(app.agent_state(a), Some(AgentState::Idle));
+        assert_eq!(app.agent_state(b), Some(AgentState::Blocked));
+        assert_eq!(app.workspace_state(1), Some(AgentState::Blocked), "most urgent wins");
+        assert_eq!(app.workspace_state(0), None, "no agents here");
+    }
+
+    #[test]
+    fn finishing_out_of_sight_is_done_until_looked_at() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        let pane = app.pane_order()[0];
+        set_agent(&mut app, pane, ReportState::Working);
+        app.switch_workspace(0); // look elsewhere
+        app.track_agents();
+        assert_eq!(app.agent_state(pane), Some(AgentState::Working));
+
+        set_agent(&mut app, pane, ReportState::Idle);
+        app.track_agents();
+        assert_eq!(app.agent_state(pane), Some(AgentState::Done));
+        app.track_agents();
+        assert_eq!(app.agent_state(pane), Some(AgentState::Done), "stays done while unseen");
+
+        app.focus_pane(pane);
+        app.track_agents();
+        assert_eq!(app.agent_state(pane), Some(AgentState::Idle), "seen");
+    }
+
+    #[test]
+    fn finishing_in_sight_is_just_idle() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        let pane = app.pane_order()[0];
+        set_agent(&mut app, pane, ReportState::Working);
+        app.track_agents();
+        set_agent(&mut app, pane, ReportState::Idle);
+        app.track_agents();
+        assert_eq!(app.agent_state(pane), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn layouts_round_trip_through_disk_with_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.layout.json");
+        let mut app = App::blank(dir.path().to_path_buf(), Some(file.clone()), "t");
+        // Two workspaces of graph panes (no shells needed).
+        app.panes.insert(0, Pane::Graph(Box::new(GraphView::new(dir.path()))));
+        app.panes.insert(1, Pane::Graph(Box::new(GraphView::new(dir.path()))));
+        app.next_id = 2;
+        app.workspaces[0].name = "web".into();
+        app.workspaces.push(Workspace {
+            name: "api".into(),
+            root: dir.path().to_path_buf(),
+            tree: Node::Leaf(1),
+            focus: 1,
+            zoomed: None,
+        });
+        app.active = 1;
+        app.load_active();
+        app.persist();
+
+        let back = App::restore(&file, "t").expect("restores");
+        let names: Vec<_> = back.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["web", "api"]);
+        assert_eq!(back.active, 1);
+        assert_eq!(back.pane_order(), [1]);
+        assert_eq!(back.panes.len(), 2);
+        assert_eq!(back.next_id, 2);
+    }
+
+    #[test]
+    fn layouts_saved_before_workspaces_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("old.layout.json");
+        let root = dir.path().display().to_string().replace('\\', "/");
+        let old = format!(
+            r#"{{"root":"{root}","tree":{{"Split":{{"dir":"Horizontal","ratio":0.5,"a":{{"Leaf":0}},"b":{{"Leaf":3}}}}}},"kinds":[[0,"Graph"],[3,"Files"]],"next_id":4,"focus":3}}"#
+        );
+        fs::write(&file, old).unwrap();
+        let app = App::restore(&file, "t").expect("old layouts load");
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(app.pane_order(), [0, 3]);
+        assert_eq!(app.focus, 3);
+        assert_eq!(app.next_id, 4);
     }
 }

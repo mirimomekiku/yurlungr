@@ -1,8 +1,8 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 use tui_term::widget::{Cursor, PseudoTerminal};
@@ -11,22 +11,38 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{App, DockHit},
     editor::{self, EditorView, Mode},
+    git_graph::{CommitDetail, FileChange},
     keymap::Action,
     overlay,
     terminal::Status,
     theme::Theme,
     views::{Clip, FilesView, GraphView, Pane},
+    workspace::AgentState,
 };
 
-const NEW_BUTTON: &str = " + new ";
+const NEW_BUTTON: &str = " + space ";
 const MENU_BUTTON: &str = " ≡ menu ";
-/// Longest pane name shown in the dock before it is cut with an ellipsis.
-const DOCK_NAME_MAX: usize = 16;
+/// Width of the left sidebar listing panes, and the narrowest screen that gets one.
+const SIDEBAR_WIDTH: u16 = 26;
+const SIDEBAR_MIN_SCREEN: u16 = 60;
+/// Lines of a commit message shown in the graph's detail panel.
+const MESSAGE_PREVIEW_LINES: usize = 4;
+
+fn sidebar_width(screen_width: u16) -> u16 {
+    if screen_width >= SIDEBAR_MIN_SCREEN {
+        SIDEBAR_WIDTH
+    } else {
+        0
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [main, dock, status] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
-            .areas(f.area());
+    // Sidebar on the left; the hint line stays at the bottom across the full width.
+    let [body, status] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+    let [sidebar, main] =
+        Layout::horizontal([Constraint::Length(sidebar_width(body.width)), Constraint::Min(1)])
+            .areas(body);
     app.area = f.area();
     app.relayout(main);
     let th = app.theme;
@@ -83,7 +99,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
-    draw_dock(f, app, dock);
+    draw_sidebar(f, app, sidebar);
     f.render_widget(Paragraph::new(status_line(app)).dim(), status);
 
     if let Some(menu) = &app.menu {
@@ -114,119 +130,166 @@ fn clip_name(name: &str, max: usize) -> String {
     out
 }
 
-/// The always-visible bar of every pane ("space") plus the new/menu buttons.
-/// Publishes click targets in `app.dock`.
-fn draw_dock(f: &mut Frame, app: &mut App, area: Rect) {
+/// Marker and colour for an agent state; `None` means the workspace has no agents.
+fn state_mark(state: Option<AgentState>, th: &Theme) -> (&'static str, ratatui::style::Color) {
+    match state {
+        Some(AgentState::Working) => ("●", th.working),
+        Some(AgentState::Blocked) => ("●", th.blocked),
+        Some(AgentState::Done) => ("✓", th.accent),
+        Some(AgentState::Idle) => ("○", th.idle),
+        None => ("·", th.dim),
+    }
+}
+
+/// First visible row of a list of `len` rows in a window of `visible` rows that
+/// keeps `selected` in view.
+fn window_start(selected: usize, visible: usize) -> usize {
+    (selected + 1).saturating_sub(visible)
+}
+
+enum AgentRow {
+    /// The workspace the agents below it belong to.
+    Header(String),
+    Agent(crate::app::AgentEntry),
+}
+
+/// The always-visible sidebar, like herdr's: a "spaces" list of workspaces (each
+/// showing the most urgent state of its agents) over an "agents" list of every
+/// agent in every workspace. The new/menu buttons sit at the bottom. Publishes
+/// click targets in `app.dock`.
+fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.dock.clear();
-
-    let buttons_w = (NEW_BUTTON.width() + 1 + MENU_BUTTON.width()) as u16;
-    let menu_x = area.right().saturating_sub(MENU_BUTTON.width() as u16);
-    let new_x = menu_x.saturating_sub(NEW_BUTTON.width() as u16 + 1);
-    let new_rect = Rect::new(new_x, area.y, NEW_BUTTON.width() as u16, 1);
-    let menu_rect = Rect::new(menu_x, area.y, MENU_BUTTON.width() as u16, 1);
-    if area.width > buttons_w {
-        f.render_widget(
-            Paragraph::new(NEW_BUTTON)
-                .style(Style::new().fg(app.theme.button_fg).bg(app.theme.button_new).bold()),
-            new_rect,
-        );
-        f.render_widget(
-            Paragraph::new(MENU_BUTTON)
-                .style(Style::new().fg(app.theme.button_fg).bg(app.theme.button_menu).bold()),
-            menu_rect,
-        );
-        app.dock.push((new_rect, DockHit::New));
-        app.dock.push((menu_rect, DockHit::Menu));
+    if area.width == 0 || area.height < 9 {
+        return;
     }
+    let th = app.theme;
+    let body_h = area.height - 1;
+    let spaces_h = (app.workspaces.len() as u16 + 2).clamp(4, (body_h * 2 / 5).max(4));
+    let [spaces_area, agents_area, buttons_area] =
+        Layout::vertical([Constraint::Length(spaces_h), Constraint::Min(3), Constraint::Length(1)])
+            .areas(area);
 
-    struct Item {
-        id: usize,
-        number: String,
-        glyph: Option<(&'static str, Color)>,
-        name: String,
-    }
-    impl Item {
-        fn width(&self) -> usize {
-            // " {number} {glyph}{name} "
-            self.number.width()
-                + 3
-                + self.glyph.map_or(0, |(g, _)| g.width() + 1)
-                + self.name.width()
-        }
-    }
-
-    let ids = app.pane_order();
-    let items: Vec<Item> = ids
-        .iter()
-        .enumerate()
-        .filter_map(|(i, id)| {
-            let pane = app.panes.get(id)?;
-            let glyph = pane.status().map(|s| match s {
-                Status::Working => ("●", app.theme.working),
-                Status::Blocked => ("●", app.theme.blocked),
-                Status::Idle => ("○", app.theme.idle),
-            });
-            Some(Item {
-                id: *id,
-                number: (i + 1).to_string(),
-                glyph,
-                name: clip_name(&pane.label(), DOCK_NAME_MAX),
-            })
-        })
-        .collect();
-
-    // Slide the window of visible entries so the focused one is always shown.
-    const MORE: usize = 5; // " +NN "
-    let avail = area.width.saturating_sub(buttons_w + 1) as usize;
-    let widths: Vec<usize> = items.iter().map(Item::width).collect();
-    let focus_idx = items.iter().position(|it| it.id == app.focus).unwrap_or(0);
-    let mut start = 0;
-    while start < focus_idx {
-        let lead = if start > 0 { 2 } else { 0 };
-        let tail = if focus_idx + 1 < items.len() { MORE } else { 0 };
-        if widths[start..=focus_idx].iter().sum::<usize>() + lead + tail <= avail {
-            break;
-        }
-        start += 1;
-    }
-
-    let mut spans: Vec<Span> = Vec::new();
-    let mut x = 0usize;
-    if start > 0 {
-        spans.push(Span::styled("‹ ", Style::new().fg(app.theme.dim)));
-        x += 2;
-    }
-    let mut shown_to = start;
-    for (i, item) in items.iter().enumerate().skip(start) {
-        let tail = if i + 1 < items.len() { MORE } else { 0 };
-        if x + widths[i] + tail > avail {
-            break;
-        }
-        let base = if item.id == app.focus {
+    // ---- spaces
+    let block = Block::bordered().title(" spaces ").border_style(Style::new().fg(th.border));
+    let inner = block.inner(spaces_area);
+    f.render_widget(block, spaces_area);
+    let visible = inner.height as usize;
+    let start = window_start(app.active, visible);
+    for (row, i) in (start..app.workspaces.len()).take(visible).enumerate() {
+        let (mark, color) = state_mark(app.workspace_state(i), &th);
+        let base = if i == app.active {
             Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else {
             Style::new()
         };
-        spans.push(Span::styled(format!(" {} ", item.number), base));
-        if let Some((g, color)) = item.glyph {
-            spans.push(Span::styled(format!("{g} "), base.fg(color)));
+        let name = clip_name(&app.workspaces[i].name, (inner.width as usize).saturating_sub(4));
+        let line = Line::from(vec![
+            Span::styled(" ", base),
+            Span::styled(format!("{mark} "), base.fg(color)),
+            Span::styled(name, base),
+        ]);
+        let rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
+        f.render_widget(Paragraph::new(line).style(base), rect);
+        app.dock.push((rect, DockHit::Workspace(i)));
+    }
+
+    // ---- agents
+    let agents = app.agents();
+    let block = Block::bordered()
+        .title(format!(
+            " agents{} ",
+            if agents.is_empty() { String::new() } else { format!(" {}", agents.len()) }
+        ))
+        .border_style(Style::new().fg(th.border));
+    let inner = block.inner(agents_area);
+    f.render_widget(block, agents_area);
+    if agents.is_empty() {
+        let dim = Style::new().fg(th.dim);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(" none running", dim)),
+                Line::from(Span::styled(" try claude, codex…", dim)),
+            ]),
+            inner,
+        );
+    } else {
+        // Group under workspace headers once agents live in more than one.
+        let mut spaces_with_agents: Vec<usize> = agents.iter().map(|a| a.workspace).collect();
+        spaces_with_agents.dedup();
+        let grouped = spaces_with_agents.len() > 1;
+        let mut rows: Vec<AgentRow> = Vec::new();
+        let mut last = None;
+        for entry in agents {
+            if grouped && last != Some(entry.workspace) {
+                rows.push(AgentRow::Header(app.workspaces[entry.workspace].name.clone()));
+            }
+            last = Some(entry.workspace);
+            rows.push(AgentRow::Agent(entry));
         }
-        spans.push(Span::styled(format!("{} ", item.name), base));
-        app.dock.push((
-            Rect::new(area.x + x as u16, area.y, widths[i] as u16, 1),
-            DockHit::Pane(item.id),
-        ));
-        x += widths[i];
-        shown_to = i + 1;
+        let current = rows
+            .iter()
+            .position(|r| matches!(r, AgentRow::Agent(a) if a.pane == app.focus && a.workspace == app.active))
+            .unwrap_or(0);
+        let visible = inner.height as usize;
+        let start = window_start(current, visible);
+        for (row, entry) in rows.iter().enumerate().skip(start).take(visible) {
+            let rect = Rect::new(inner.x, inner.y + (row - start) as u16, inner.width, 1);
+            match entry {
+                AgentRow::Header(name) => {
+                    let text = clip_name(name, (inner.width as usize).saturating_sub(2));
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            format!(" {text}"),
+                            Style::new().fg(th.dim).add_modifier(Modifier::BOLD),
+                        ))),
+                        rect,
+                    );
+                }
+                AgentRow::Agent(a) => {
+                    let focused = a.pane == app.focus && a.workspace == app.active;
+                    let base = if focused {
+                        Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        Style::new()
+                    };
+                    let (mark, color) = state_mark(Some(a.state), &th);
+                    let word = a.state.label();
+                    let width = inner.width as usize;
+                    let room = width.saturating_sub(4 + word.width() + 1);
+                    let name = clip_name(&a.name, room.max(3));
+                    let pad = width.saturating_sub(3 + name.width() + word.width() + 1);
+                    let line = Line::from(vec![
+                        Span::styled(" ", base),
+                        Span::styled(format!("{mark} "), base.fg(color)),
+                        Span::styled(name, base),
+                        Span::styled(" ".repeat(pad), base),
+                        Span::styled(word, if focused { base } else { Style::new().fg(th.dim) }),
+                    ]);
+                    f.render_widget(Paragraph::new(line).style(base), rect);
+                    app.dock.push((rect, DockHit::Agent(a.pane)));
+                }
+            }
+        }
     }
-    if shown_to < items.len() {
-        spans.push(Span::styled(
-            format!(" +{} ", items.len() - shown_to),
-            Style::new().fg(app.theme.dim),
-        ));
+
+    // ---- buttons
+    let y = buttons_area.y;
+    let new_rect = Rect::new(buttons_area.x + 1, y, NEW_BUTTON.width() as u16, 1);
+    let menu_rect = Rect::new(new_rect.right() + 1, y, MENU_BUTTON.width() as u16, 1);
+    if menu_rect.right() <= buttons_area.right() {
+        f.render_widget(
+            Paragraph::new(NEW_BUTTON)
+                .style(Style::new().fg(th.button_fg).bg(th.button_new).bold()),
+            new_rect,
+        );
+        f.render_widget(
+            Paragraph::new(MENU_BUTTON)
+                .style(Style::new().fg(th.button_fg).bg(th.button_menu).bold()),
+            menu_rect,
+        );
+        app.dock.push((new_rect, DockHit::NewWorkspace));
+        app.dock.push((menu_rect, DockHit::Menu));
     }
-    let list_area = Rect { width: area.width.saturating_sub(buttons_w + 1), ..area };
-    f.render_widget(Paragraph::new(Line::from(spans)), list_area);
 }
 
 /// "key action" pairs for the status line, from the live keymap.
@@ -258,8 +321,11 @@ fn status_line(app: &App) -> String {
     }
     let km = &app.config.keymap;
     if app.prefix {
-        let all = Action::all();
-        return format!(" PREFIX  {}", hints(app, &all[..24], Some(true)));
+        let global: Vec<Action> = Action::all()
+            .into_iter()
+            .filter(|a| a.scope() == crate::keymap::Scope::Global)
+            .collect();
+        return format!(" PREFIX  {}", hints(app, &global, Some(true)));
     }
     match app.panes.get(&app.focus) {
         Some(Pane::Files(v)) if v.prompt.is_some() => {
@@ -287,18 +353,29 @@ fn status_line(app: &App) -> String {
     }
     let (working, blocked, idle) = app.status_counts();
     format!(
-        " {} prefix · split {} {} {} · jump {} · menu: {} · {working} working · {blocked} blocked · {idle} idle{}",
+        " {} prefix · split {} {} {} · space {} · menu: {} · {working} working · {blocked} blocked · {idle} idle{}",
         km.prefix.format(),
         km.hint(Action::SplitLeft),
         km.hint(Action::SplitRight),
         km.hint(Action::SplitDown),
-        km.hint(Action::GotoPane(1)).replace('1', "N"),
+        km.hint(Action::GotoWorkspace(1)).replace('1', "N"),
         km.hint(Action::OpenMenu),
         if app.zoomed.is_some() { " · zoomed" } else { "" }
     )
 }
 
 fn render_graph(f: &mut Frame, v: &mut GraphView, block: Block, rect: Rect, th: &Theme) {
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    // The detail panel needs room; on a short pane only the list is shown.
+    let detail_height =
+        if v.show_detail && inner.height >= 14 { (inner.height / 2).clamp(8, 24) } else { 0 };
+    let [list_area, detail_area] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(detail_height)]).areas(inner);
+    v.list_area = list_area;
+    v.detail_area = detail_area;
+
     let highlight = Style::new().add_modifier(Modifier::REVERSED);
     match &v.rows {
         Ok(rows) => {
@@ -316,18 +393,152 @@ fn render_graph(f: &mut Frame, v: &mut GraphView, block: Block, rect: Rect, th: 
                         ));
                     }
                     spans.push(Span::raw(r.summary.clone()));
-                    spans.push(Span::styled(format!("  {}", r.author), Style::new().dim()));
+                    spans.push(Span::styled(
+                        format!("  {} · {}", r.author, r.date),
+                        Style::new().fg(th.dim),
+                    ));
                     ListItem::new(Line::from(spans))
                 })
                 .collect();
             f.render_stateful_widget(
-                List::new(items).block(block).highlight_style(highlight),
-                rect,
+                List::new(items).highlight_style(highlight),
+                list_area,
                 &mut v.state,
             );
         }
-        Err(e) => f.render_widget(Paragraph::new(e.as_str()).block(block), rect),
+        Err(e) => {
+            f.render_widget(Paragraph::new(e.as_str()), inner);
+            return;
+        }
     }
+
+    if detail_height > 0 {
+        v.ensure_detail();
+        let refs = v.selected_row().map(|r| r.refs.clone()).unwrap_or_default();
+        let panel = Block::default()
+            .borders(Borders::TOP)
+            .title(" commit ")
+            .border_style(Style::new().fg(th.border));
+        let body = panel.inner(detail_area);
+        f.render_widget(panel, detail_area);
+        let lines = match v.detail() {
+            Some(Ok(d)) => detail_lines(d, &refs, body.width as usize, th),
+            Some(Err(e)) => {
+                vec![Line::from(Span::styled(format!(" {e}"), Style::new().fg(th.danger)))]
+            }
+            None => Vec::new(),
+        };
+        v.detail_scroll = v.detail_scroll.min(lines.len().saturating_sub(body.height as usize));
+        f.render_widget(Paragraph::new(lines).scroll((v.detail_scroll as u16, 0)), body);
+    }
+}
+
+/// Keep the end of a long path, which is the informative part.
+fn clip_left(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(count - max.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
+fn file_line(file: &FileChange, width: usize, th: &Theme) -> Line<'static> {
+    let color = match file.status {
+        'A' => th.working,
+        'D' => th.danger,
+        'M' => th.marker,
+        'R' | 'C' => th.accent,
+        _ => th.dim,
+    };
+    let stat = if file.binary {
+        vec![Span::styled("binary", Style::new().fg(th.dim))]
+    } else {
+        vec![
+            Span::styled(format!("+{}", file.added), Style::new().fg(th.working)),
+            Span::raw(" "),
+            Span::styled(format!("-{}", file.deleted), Style::new().fg(th.danger)),
+        ]
+    };
+    let stat_width: usize = stat.iter().map(|s| s.content.width()).sum();
+    let room = width.saturating_sub(4 + stat_width + 1);
+    let path = clip_left(&file.path, room);
+    let pad = width.saturating_sub(3 + path.width() + stat_width + 1);
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(file.status.to_string(), Style::new().fg(color).bold()),
+        Span::raw(" "),
+        Span::raw(path),
+        Span::raw(" ".repeat(pad)),
+    ];
+    spans.extend(stat);
+    Line::from(spans)
+}
+
+/// The text of the commit detail panel: who, when, what, and the files changed.
+fn detail_lines(d: &CommitDetail, refs: &[String], width: usize, th: &Theme) -> Vec<Line<'static>> {
+    let label = |text: &str| Span::styled(format!(" {text:<10}"), Style::new().fg(th.dim));
+    let mut lines = Vec::new();
+
+    let mut head =
+        vec![label("commit"), Span::styled(d.id.clone(), Style::new().fg(th.graph_hash).bold())];
+    if !refs.is_empty() {
+        head.push(Span::styled(
+            format!("  ({})", refs.join(", ")),
+            Style::new().fg(th.graph_ref).bold(),
+        ));
+    }
+    lines.push(Line::from(head));
+    lines.push(Line::from(vec![
+        label("author"),
+        Span::raw(format!("{}  {}", d.author, d.author_time)),
+    ]));
+    lines.push(Line::from(vec![
+        label("committer"),
+        Span::raw(format!("{}  {}", d.committer, d.commit_time)),
+    ]));
+    let parents =
+        if d.parents.is_empty() { "none (root commit)".to_string() } else { d.parents.join(" ") };
+    lines.push(Line::from(vec![label("parents"), Span::raw(parents)]));
+    lines.push(Line::raw(""));
+
+    // A long body would push the file list out of view, so only a preview is shown.
+    let message: Vec<&str> = d.message.lines().collect();
+    for (i, text) in message.iter().take(MESSAGE_PREVIEW_LINES).enumerate() {
+        let style = if i == 0 { Style::new().bold() } else { Style::new() };
+        lines.push(Line::from(Span::styled(format!("  {text}"), style)));
+    }
+    if message.len() > MESSAGE_PREVIEW_LINES {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more lines", message.len() - MESSAGE_PREVIEW_LINES),
+            Style::new().fg(th.dim),
+        )));
+    }
+    lines.push(Line::raw(""));
+
+    let noun = if d.files_total == 1 { "file" } else { "files" };
+    let mut summary =
+        vec![Span::styled(format!(" {} {noun} changed", d.files_total), Style::new().bold())];
+    if let Some((added, deleted)) = d.lines {
+        summary.push(Span::raw(", "));
+        summary.push(Span::styled(format!("+{added}"), Style::new().fg(th.working)));
+        summary.push(Span::raw(" "));
+        summary.push(Span::styled(format!("-{deleted}"), Style::new().fg(th.danger)));
+    } else {
+        summary.push(Span::styled(" (too large to count lines)", Style::new().fg(th.dim)));
+    }
+    if d.parents.len() > 1 {
+        summary.push(Span::styled("  (against first parent)", Style::new().fg(th.dim)));
+    }
+    lines.push(Line::from(summary));
+    lines.extend(d.files.iter().map(|f| file_line(f, width, th)));
+    if d.files_total > d.files.len() {
+        lines.push(Line::from(Span::styled(
+            format!(" … and {} more files", d.files_total - d.files.len()),
+            Style::new().fg(th.dim),
+        )));
+    }
+    lines
 }
 
 fn render_files(
@@ -444,5 +655,25 @@ fn render_editor(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_only_appears_on_screens_wide_enough() {
+        assert_eq!(sidebar_width(59), 0);
+        assert_eq!(sidebar_width(60), SIDEBAR_WIDTH);
+        assert_eq!(sidebar_width(200), SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn long_paths_keep_their_tail() {
+        assert_eq!(clip_left("src/app.rs", 20), "src/app.rs");
+        assert_eq!(clip_left("src/deeply/nested/app.rs", 10), "…ed/app.rs");
+        assert_eq!(clip_left("abcdef", 4), "…def");
+        assert_eq!(clip_left("abcdef", 1), "…");
     }
 }

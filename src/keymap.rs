@@ -222,8 +222,13 @@ pub enum Action {
     OpenKeybinds,
     OpenSettings,
     OpenThemes,
-    /// Jump to the n-th pane (1-based, in dock order).
-    GotoPane(u8),
+    NewWorkspace,
+    CloseWorkspace,
+    RenameWorkspace,
+    NextWorkspace,
+    PrevWorkspace,
+    /// Jump to the n-th workspace (1-based).
+    GotoWorkspace(u8),
     FileNewFile,
     FileNewDir,
     FileRename,
@@ -243,51 +248,58 @@ pub enum Action {
 
 use Action::*;
 
-const FIXED: [Action; 35] = [
-    SplitLeft,
-    SplitRight,
-    SplitDown,
-    NewTerminal,
-    OpenGraph,
-    OpenFiles,
-    ClosePane,
-    ZoomPane,
-    NextPane,
-    PrevPane,
-    FocusLeft,
-    FocusRight,
-    FocusUp,
-    FocusDown,
-    ResizeLeft,
-    ResizeRight,
-    ResizeUp,
-    ResizeDown,
-    Detach,
-    QuitSession,
-    OpenMenu,
-    OpenKeybinds,
-    OpenSettings,
-    OpenThemes,
-    FileNewFile,
-    FileNewDir,
-    FileRename,
-    FileMove,
-    FileDelete,
-    FileCopy,
-    FileCut,
-    FilePaste,
-    FileEdit,
-    FileToggleHidden,
-    FileRefresh,
-];
-
 impl Action {
     /// Every action, in the order the keybinding dialog lists them.
     pub fn all() -> Vec<Action> {
-        let mut all: Vec<Action> = FIXED[..24].to_vec();
-        all.extend((1..=9).map(GotoPane));
-        all.extend_from_slice(&FIXED[24..]);
-        all.extend([EditorSave, EditorStartEdit, EditorStopEdit, EditorReload]);
+        let mut all = vec![
+            SplitLeft,
+            SplitRight,
+            SplitDown,
+            NewTerminal,
+            OpenGraph,
+            OpenFiles,
+            ClosePane,
+            ZoomPane,
+            NextPane,
+            PrevPane,
+            FocusLeft,
+            FocusRight,
+            FocusUp,
+            FocusDown,
+            ResizeLeft,
+            ResizeRight,
+            ResizeUp,
+            ResizeDown,
+            NewWorkspace,
+            RenameWorkspace,
+            CloseWorkspace,
+            NextWorkspace,
+            PrevWorkspace,
+        ];
+        all.extend((1..=9).map(GotoWorkspace));
+        all.extend([
+            Detach,
+            QuitSession,
+            OpenMenu,
+            OpenKeybinds,
+            OpenSettings,
+            OpenThemes,
+            FileNewFile,
+            FileNewDir,
+            FileRename,
+            FileMove,
+            FileDelete,
+            FileCopy,
+            FileCut,
+            FilePaste,
+            FileEdit,
+            FileToggleHidden,
+            FileRefresh,
+            EditorSave,
+            EditorStartEdit,
+            EditorStopEdit,
+            EditorReload,
+        ]);
         all
     }
 
@@ -327,7 +339,12 @@ impl Action {
             OpenKeybinds => "open_keybinds",
             OpenSettings => "open_settings",
             OpenThemes => "open_themes",
-            GotoPane(n) => return format!("goto_pane_{n}"),
+            NewWorkspace => "new_workspace",
+            CloseWorkspace => "close_workspace",
+            RenameWorkspace => "rename_workspace",
+            NextWorkspace => "next_workspace",
+            PrevWorkspace => "prev_workspace",
+            GotoWorkspace(n) => return format!("goto_workspace_{n}"),
             FileNewFile => "file_new_file",
             FileNewDir => "file_new_dir",
             FileRename => "file_rename",
@@ -377,7 +394,12 @@ impl Action {
             OpenKeybinds => "Open keybindings".into(),
             OpenSettings => "Open settings".into(),
             OpenThemes => "Open theme picker".into(),
-            GotoPane(n) => format!("Jump to pane {n}"),
+            NewWorkspace => "New workspace".into(),
+            CloseWorkspace => "Close workspace (and its panes)".into(),
+            RenameWorkspace => "Rename workspace".into(),
+            NextWorkspace => "Next workspace".into(),
+            PrevWorkspace => "Previous workspace".into(),
+            GotoWorkspace(n) => format!("Jump to workspace {n}"),
             FileNewFile => "Files: new file".into(),
             FileNewDir => "Files: new folder".into(),
             FileRename => "Files: rename".into(),
@@ -417,7 +439,12 @@ impl Action {
             OpenKeybinds => "keys".into(),
             OpenSettings => "settings".into(),
             OpenThemes => "theme".into(),
-            GotoPane(n) => format!("pane {n}"),
+            NewWorkspace => "new space".into(),
+            CloseWorkspace => "close space".into(),
+            RenameWorkspace => "rename space".into(),
+            NextWorkspace => "next space".into(),
+            PrevWorkspace => "prev space".into(),
+            GotoWorkspace(n) => format!("space {n}"),
             FileNewFile => "new file".into(),
             FileNewDir => "new folder".into(),
             FileRename => "rename".into(),
@@ -462,7 +489,12 @@ impl Action {
             OpenKeybinds => &["prefix ?"],
             OpenSettings => &["prefix ,"],
             OpenThemes => &["prefix t"],
-            GotoPane(n) => return vec![format!("alt+{n}"), format!("prefix {n}")],
+            NewWorkspace => &["prefix N"],
+            CloseWorkspace => &["prefix X"],
+            RenameWorkspace => &["prefix r"],
+            NextWorkspace => &["prefix n"],
+            PrevWorkspace => &["prefix p"],
+            GotoWorkspace(n) => return vec![format!("alt+{n}"), format!("prefix {n}")],
             FileNewFile => &["n"],
             FileNewDir => &["N"],
             FileRename => &["r", "f2"],
@@ -700,14 +732,14 @@ mod tests {
         assert_eq!(g(false, "ctrl+up"), None, "there is no split-up");
         assert_eq!(g(false, "ctrl+tab"), Some(NextPane));
         assert_eq!(g(false, "ctrl+shift+tab"), Some(PrevPane));
-        assert_eq!(g(false, "alt+3"), Some(GotoPane(3)));
+        assert_eq!(g(false, "alt+3"), Some(GotoWorkspace(3)));
         assert_eq!(g(false, "ctrl+3"), None, "ctrl+digit is no longer bound");
         // Keys GNOME Terminal and similar emulators pass through to programs.
         assert_eq!(g(false, "alt+left"), Some(FocusLeft));
         assert_eq!(g(false, "alt+down"), Some(FocusDown));
         assert_eq!(g(false, "alt+pagedown"), Some(NextPane));
         assert_eq!(g(false, "alt+pageup"), Some(PrevPane));
-        assert_eq!(g(true, "3"), Some(GotoPane(3)));
+        assert_eq!(g(true, "3"), Some(GotoWorkspace(3)));
         assert_eq!(g(true, "x"), Some(ClosePane));
     }
 

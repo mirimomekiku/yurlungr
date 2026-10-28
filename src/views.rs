@@ -2,19 +2,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use crossterm::event::KeyCode;
-use ratatui::widgets::ListState;
+use ratatui::{layout::Rect, widgets::ListState};
 
 use crate::{
     editor::{EditorView, Mode},
     file_browser::{self, FileBrowser},
-    git_graph::{self, GraphRow},
+    git_graph::{self, CommitDetail, GraphRow},
     keymap::Action,
     terminal::{Status, Terminal},
 };
 
 pub enum Pane {
     Terminal(Terminal),
-    Graph(GraphView),
+    Graph(Box<GraphView>),
     Files(FilesView),
     Editor(EditorView),
 }
@@ -47,20 +47,6 @@ impl Pane {
             ),
         }
     }
-
-    /// Short name for the dock.
-    pub fn label(&self) -> String {
-        match self {
-            Pane::Terminal(t) => t.agent().unwrap_or("shell").to_string(),
-            Pane::Graph(_) => "graph".to_string(),
-            Pane::Files(v) => {
-                v.fb.dir
-                    .file_name()
-                    .map_or_else(|| "files".to_string(), |n| n.to_string_lossy().into_owned())
-            }
-            Pane::Editor(v) => format!("{}{}", v.name(), if v.dirty { "*" } else { "" }),
-        }
-    }
 }
 
 fn step(state: &mut ListState, len: usize, delta: isize) {
@@ -71,10 +57,25 @@ fn step(state: &mut ListState, len: usize, delta: isize) {
     state.select(Some((cur + delta).clamp(0, len as isize - 1) as usize));
 }
 
+/// What the app should do after a graph view handled a key.
+pub enum GraphAct {
+    None,
+    /// Put this text on the system clipboard.
+    Copy(String),
+    Msg(String),
+}
+
 pub struct GraphView {
     root: PathBuf,
     pub rows: Result<Vec<GraphRow>, String>,
     pub state: ListState,
+    /// Full id and details of the commit shown in the detail panel.
+    detail: Option<(String, Result<CommitDetail, String>)>,
+    pub detail_scroll: usize,
+    pub show_detail: bool,
+    /// Where the renderer last drew the commit list and the detail panel.
+    pub list_area: Rect,
+    pub detail_area: Rect,
 }
 
 impl GraphView {
@@ -83,6 +84,11 @@ impl GraphView {
             root: root.to_path_buf(),
             rows: git_graph::load(root, 500).map_err(|e| e.to_string()),
             state: ListState::default().with_selected(Some(0)),
+            detail: None,
+            detail_scroll: 0,
+            show_detail: true,
+            list_area: Rect::default(),
+            detail_area: Rect::default(),
         }
     }
 
@@ -90,9 +96,32 @@ impl GraphView {
         self.rows.as_ref().map_or(0, Vec::len)
     }
 
+    pub fn selected_row(&self) -> Option<&GraphRow> {
+        self.rows.as_ref().ok()?.get(self.state.selected()?)
+    }
+
+    /// Load the details of the selected commit if they are not the ones shown.
+    pub fn ensure_detail(&mut self) {
+        let Some(id) = self.selected_row().map(|r| r.full_id.clone()) else { return };
+        if self.detail.as_ref().is_some_and(|(shown, _)| *shown == id) {
+            return;
+        }
+        let loaded = git_graph::detail(&self.root, &id).map_err(|e| e.to_string());
+        self.detail = Some((id, loaded));
+        self.detail_scroll = 0;
+    }
+
+    pub fn detail(&self) -> Option<&Result<CommitDetail, String>> {
+        self.detail.as_ref().map(|(_, d)| d)
+    }
+
     pub fn scroll(&mut self, delta: isize) {
         let len = self.len();
         step(&mut self.state, len, delta);
+    }
+
+    pub fn scroll_detail(&mut self, delta: isize) {
+        self.detail_scroll = (self.detail_scroll as isize + delta).max(0) as usize;
     }
 
     pub fn select(&mut self, idx: usize) {
@@ -101,7 +130,7 @@ impl GraphView {
         }
     }
 
-    pub fn key(&mut self, code: KeyCode) {
+    pub fn key(&mut self, code: KeyCode) -> GraphAct {
         match code {
             KeyCode::Down | KeyCode::Char('j') => self.scroll(1),
             KeyCode::Up | KeyCode::Char('k') => self.scroll(-1),
@@ -109,12 +138,23 @@ impl GraphView {
             KeyCode::PageUp => self.scroll(-10),
             KeyCode::Home | KeyCode::Char('g') => self.state.select(Some(0)),
             KeyCode::End | KeyCode::Char('G') => self.scroll(isize::MAX / 2),
+            KeyCode::Char('J') => self.scroll_detail(1),
+            KeyCode::Char('K') => self.scroll_detail(-1),
+            KeyCode::Char('d') => self.show_detail = !self.show_detail,
+            KeyCode::Char('y') => {
+                if let Some(row) = self.selected_row() {
+                    return GraphAct::Copy(row.full_id.clone());
+                }
+            }
             KeyCode::Char('r') => {
                 self.rows = git_graph::load(&self.root, 500).map_err(|e| e.to_string());
                 self.state.select(Some(0));
+                self.detail = None;
+                return GraphAct::Msg("graph reloaded".to_string());
             }
             _ => {}
         }
+        GraphAct::None
     }
 }
 

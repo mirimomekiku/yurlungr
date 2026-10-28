@@ -11,7 +11,11 @@ pub enum MenuAction {
     NewFiles,
     Zoom,
     Close,
-    // App dropdown (the dock's menu button).
+    // Workspace context menu (right click on a space in the sidebar).
+    NewWorkspace,
+    RenameWorkspace,
+    CloseWorkspace,
+    // App dropdown (the sidebar's menu button).
     Keybindings,
     Settings,
     Themes,
@@ -22,6 +26,7 @@ pub enum MenuAction {
 pub struct Menu {
     pub x: u16,
     pub y: u16,
+    /// A pane id for pane and app menus; a workspace index for the workspace menu.
     pub target: PaneId,
     pub items: Vec<(&'static str, MenuAction)>,
     pub selected: usize,
@@ -54,11 +59,27 @@ impl Menu {
             target,
             selected: 0,
             items: vec![
+                ("New workspace", MenuAction::NewWorkspace),
                 ("Keybindings...", MenuAction::Keybindings),
                 ("Settings...", MenuAction::Settings),
                 ("Theme...", MenuAction::Themes),
                 ("Detach", MenuAction::Detach),
                 ("Quit session", MenuAction::QuitSession),
+            ],
+        }
+    }
+
+    /// The right-click menu for one workspace (`index` into the workspace list).
+    pub fn workspace(x: u16, y: u16, index: usize) -> Self {
+        Self {
+            x,
+            y,
+            target: index,
+            selected: 0,
+            items: vec![
+                ("New workspace", MenuAction::NewWorkspace),
+                ("Rename...", MenuAction::RenameWorkspace),
+                ("Close workspace", MenuAction::CloseWorkspace),
             ],
         }
     }
