@@ -12,11 +12,14 @@ use std::{
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::proto::ReportState;
+use crate::{agents, proto::ReportState};
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
 const SCROLLBACK: usize = 5000;
+
+/// How often a pane's foreground process is inspected.
+const PROBE_EVERY: Duration = Duration::from_millis(1500);
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -108,6 +111,9 @@ pub struct Terminal {
     last_output: Arc<AtomicU64>,
     last_input: AtomicU64,
     report: Option<AgentReport>,
+    /// The agent found by looking at the foreground process, with no hooks involved.
+    detected: Option<&'static str>,
+    last_probe: Instant,
     size: (u16, u16),
 }
 
@@ -176,6 +182,8 @@ impl Terminal {
             last_output,
             last_input: AtomicU64::new(0),
             report: None,
+            detected: None,
+            last_probe: Instant::now(),
             size: (rows, cols),
         })
     }
@@ -210,8 +218,24 @@ impl Terminal {
         };
     }
 
+    /// The agent in this pane: the one its hooks reported, else the one detected
+    /// from the foreground process.
     pub fn agent(&self) -> Option<&str> {
-        self.report.as_ref().map(|r| r.agent.as_str())
+        self.report.as_ref().map(|r| r.agent.as_str()).or(self.detected)
+    }
+
+    /// Look at what is running in the foreground of this pane. Cheap enough to
+    /// call every tick: it only does work once per `PROBE_EVERY`.
+    pub fn probe_agent(&mut self) {
+        if self.last_probe.elapsed() < PROBE_EVERY {
+            return;
+        }
+        self.last_probe = Instant::now();
+        self.detected = self
+            .master
+            .process_group_leader()
+            .and_then(|pid| agents::command_line(i64::from(pid)))
+            .and_then(|args| agents::detect(&args));
     }
 
     pub fn status(&self) -> Status {
