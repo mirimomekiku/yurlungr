@@ -20,6 +20,7 @@ mod settings;
 mod terminal;
 mod theme;
 mod ui;
+mod usage;
 mod views;
 mod workspace;
 
