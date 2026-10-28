@@ -21,9 +21,10 @@ use crate::{
     layout::{Dir, Divider, Node, PaneId},
     menu::{Menu, MenuAction},
     mouse,
-    overlay::{Keybinds, NameInput, Overlay, SettingsDialog, ThemePicker},
+    overlay::{Confirm, ConfirmAction, Keybinds, NameInput, Overlay, ThemePicker},
     proto::ReportState,
     settings,
+    settings_dialog::SettingsDialog,
     terminal::{Status, Terminal},
     theme::{self, Theme},
     views::{Clip, FilesAct, FilesView, GraphAct, GraphView, Pane},
@@ -148,8 +149,6 @@ pub struct App {
     /// Agent panes that finished while another pane had focus.
     done: HashSet<PaneId>,
     prev_state: HashMap<PaneId, Status>,
-    /// A workspace whose close was requested once already (needs confirming).
-    pending_ws_close: Option<usize>,
     /// True after the prefix key until the next key press.
     pub prefix: bool,
     pub menu: Option<Menu>,
@@ -165,8 +164,6 @@ pub struct App {
     pub dock: Vec<(Rect, DockHit)>,
     /// Copy/cut marker shared by all file browsers.
     pub file_clip: Option<Clip>,
-    /// An editor with unsaved changes whose close was refused once already.
-    pending_close: Option<PaneId>,
     dividers: Vec<Divider>,
     drag: Option<Drag>,
     pub sel: Option<Selection>,
@@ -208,14 +205,12 @@ impl App {
             zoomed: None,
             done: HashSet::new(),
             prev_state: HashMap::new(),
-            pending_ws_close: None,
             prefix: false,
             menu: None,
             notice: None,
             rects: Vec::new(),
             dock: Vec::new(),
             file_clip: None,
-            pending_close: None,
             dividers: Vec::new(),
             drag: None,
             sel: None,
@@ -409,8 +404,6 @@ impl App {
         self.drag = None;
         self.rects.clear();
         self.dividers.clear();
-        self.pending_close = None;
-        self.pending_ws_close = None;
     }
 
     pub fn ws_root(&self) -> PathBuf {
@@ -448,6 +441,20 @@ impl App {
             self.switch_workspace(i);
         } else {
             self.notice = Some(format!("there is no workspace {n}"));
+        }
+    }
+
+    /// Jump to the n-th pane of the current workspace (1-based, layout order).
+    fn goto_pane(&mut self, n: u8) {
+        match self.pane_order().get(n as usize - 1) {
+            Some(&id) => {
+                self.focus = id;
+                if self.zoomed.is_some() {
+                    self.zoomed = Some(id);
+                }
+                self.sel = None;
+            }
+            None => self.notice = Some(format!("there is no pane {n} in this workspace")),
         }
     }
 
@@ -520,26 +527,61 @@ impl App {
         }
     }
 
-    /// Close a workspace, asking for the request to be repeated first because
-    /// it ends every shell in it.
+    /// Ask before closing a workspace: it ends every shell in it.
     fn request_close_workspace(&mut self, i: usize) {
         if self.workspaces.len() <= 1 {
             self.notice =
                 Some("this is the only workspace; detach or quit the session instead".into());
             return;
         }
-        if self.pending_ws_close != Some(i) {
-            self.pending_ws_close = Some(i);
-            let w = &self.workspaces[i];
-            self.notice = Some(format!(
-                "close workspace '{}' and its {} panes? repeat to confirm",
-                w.name,
-                self.ws_ids(i).len()
+        let Some(w) = self.workspaces.get(i) else { return };
+        let panes = self.ws_ids(i);
+        let shells =
+            panes.iter().filter(|id| matches!(self.panes.get(id), Some(Pane::Terminal(_)))).count();
+        let mut lines = vec![format!(
+            "'{}' has {} pane{} and {} shell{}.",
+            w.name,
+            panes.len(),
+            if panes.len() == 1 { "" } else { "s" },
+            shells,
+            if shells == 1 { "" } else { "s" }
+        )];
+        lines.push("Everything running in them will be stopped.".to_string());
+        let unsaved = panes
+            .iter()
+            .filter(|id| matches!(self.panes.get(id), Some(Pane::Editor(v)) if v.dirty))
+            .count();
+        if unsaved > 0 {
+            lines.push(format!(
+                "{unsaved} file{} with unsaved changes will be lost.",
+                if unsaved == 1 { "" } else { "s" }
             ));
-            return;
         }
-        self.pending_ws_close = None;
-        self.remove_workspace(i);
+        self.overlay = Some(Overlay::Confirm(Confirm::new(
+            format!("Close workspace '{}'?", w.name),
+            lines,
+            ConfirmAction::CloseWorkspace(w.name.clone()),
+            "Close workspace",
+        )));
+    }
+
+    /// Carry out an accepted confirmation. Targets are looked up again because
+    /// the layout may have changed (a shell exiting) while the dialog was open.
+    pub fn run_confirmed(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::ClosePane(id) => {
+                if self.panes.contains_key(&id) {
+                    self.close(id);
+                }
+            }
+            ConfirmAction::CloseWorkspace(name) => {
+                if self.workspaces.len() > 1 {
+                    if let Some(i) = self.workspaces.iter().position(|w| w.name == name) {
+                        self.remove_workspace(i);
+                    }
+                }
+            }
+        }
     }
 
     pub fn rename_workspace(&mut self, i: usize, raw: &str) -> Result<(), String> {
@@ -718,16 +760,40 @@ impl App {
         }
     }
 
-    /// Close a pane, but make the user confirm once if an editor has unsaved changes.
+    /// Close a pane, asking first when that would stop a shell or lose unsaved
+    /// edits. Browsers and graphs hold nothing, so they close straight away.
     fn request_close(&mut self, id: PaneId) {
-        let unsaved = matches!(self.panes.get(&id), Some(Pane::Editor(v)) if v.dirty);
-        if unsaved && self.pending_close != Some(id) {
-            self.pending_close = Some(id);
-            self.notice = Some("unsaved changes: close again to discard them".to_string());
-            return;
+        let (title, mut lines) = match self.panes.get(&id) {
+            Some(Pane::Terminal(_)) => (
+                "Close terminal pane?".to_string(),
+                vec!["The shell and anything running in it will be stopped.".to_string()],
+            ),
+            Some(Pane::Editor(v)) if v.dirty => (
+                format!("Close {}?", v.name()),
+                vec![format!("Unsaved changes to {} will be lost.", v.name())],
+            ),
+            Some(_) => return self.close(id),
+            None => return,
+        };
+        // Closing the only pane of a workspace takes the workspace with it.
+        if let Some(ws) = self.workspace_of(id) {
+            if self.ws_ids(ws).len() <= 1 {
+                lines.push(if self.workspaces.len() <= 1 {
+                    "This is the last pane, so the session will end.".to_string()
+                } else {
+                    format!(
+                        "It is the last pane, so workspace '{}' will close too.",
+                        self.workspaces[ws].name
+                    )
+                });
+            }
         }
-        self.pending_close = None;
-        self.close(id);
+        self.overlay = Some(Overlay::Confirm(Confirm::new(
+            title,
+            lines,
+            ConfirmAction::ClosePane(id),
+            "Close",
+        )));
     }
 
     /// Pane ids in layout order.
@@ -907,10 +973,6 @@ impl App {
 
         let combo = KeyCombo::from_event(key);
         let is_prefix_key = combo == self.config.keymap.prefix;
-        if !self.prefix && !is_prefix_key {
-            self.pending_close = None;
-            self.pending_ws_close = None;
-        }
         let scope = self.focus_scope();
 
         if self.prefix {
@@ -1046,6 +1108,7 @@ impl App {
             Action::NextWorkspace => self.cycle_workspace(false),
             Action::PrevWorkspace => self.cycle_workspace(true),
             Action::GotoWorkspace(n) => self.goto_workspace(n),
+            Action::GotoPane(n) => self.goto_pane(n),
             // File browser and editor actions are resolved against the focused pane.
             _ => {}
         }
@@ -1085,6 +1148,13 @@ impl App {
                 "saved".to_string()
             }
             Err(e) => format!("could not save config: {e:#}"),
+        }
+    }
+
+    /// Let an open dialog collect background results (the usage scan).
+    pub fn poll_overlay(&mut self) {
+        if let Some(overlay) = &mut self.overlay {
+            overlay.poll();
         }
     }
 
@@ -1168,12 +1238,23 @@ impl App {
     fn on_mouse(&mut self, m: MouseEvent) -> Result<()> {
         let (x, y) = (m.column, m.row);
 
-        // A dialog owns the screen: the wheel scrolls it, everything else is ignored.
-        if let Some(overlay) = &mut self.overlay {
-            match m.kind {
-                MouseEventKind::ScrollUp => overlay.scroll(-3),
-                MouseEventKind::ScrollDown => overlay.scroll(3),
-                _ => {}
+        // A dialog owns the screen: the wheel scrolls it, a click can press its
+        // buttons, everything else is ignored.
+        if let Some(mut overlay) = self.overlay.take() {
+            let keep = match m.kind {
+                MouseEventKind::ScrollUp => {
+                    overlay.scroll(-3);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    overlay.scroll(3);
+                    true
+                }
+                MouseEventKind::Down(MouseButton::Left) => overlay.click(self, x, y),
+                _ => true,
+            };
+            if keep {
+                self.overlay.get_or_insert(overlay);
             }
             return Ok(());
         }
@@ -1474,22 +1555,52 @@ mod tests {
         assert!(app.quit);
     }
 
+    /// Answer the open confirmation dialog with a key, as a user would.
+    fn answer(app: &mut App, code: KeyCode) {
+        let mut dialog = app.overlay.take().expect("a dialog is open");
+        let keep = dialog.key(app, KeyEvent::new(code, KeyModifiers::NONE));
+        if keep {
+            app.overlay = Some(dialog);
+        }
+    }
+
+    fn confirm_text(app: &App) -> String {
+        match &app.overlay {
+            Some(Overlay::Confirm(c)) => format!("{} {}", c.title(), c.text()),
+            _ => panic!("no confirmation dialog is open"),
+        }
+    }
+
     #[test]
-    fn closing_the_active_workspace_activates_a_neighbour() {
+    fn closing_the_active_workspace_asks_first() {
         let (_d, mut app) = light_app();
         app.new_workspace();
         app.new_workspace();
         assert_eq!((app.active, app.workspaces.len()), (2, 3));
+
         app.request_close_workspace(2);
-        assert_eq!(app.workspaces.len(), 3, "the first request only asks for confirmation");
-        assert!(app.notice.as_deref().is_some_and(|n| n.contains("repeat to confirm")));
+        assert_eq!(app.workspaces.len(), 3, "nothing happens until answered");
+        assert!(confirm_text(&app).contains("1 pane"), "{}", confirm_text(&app));
+        answer(&mut app, KeyCode::Enter);
+        assert_eq!(app.workspaces.len(), 3, "Enter alone keeps it: No is the default");
+        assert!(app.overlay.is_none());
+
         app.request_close_workspace(2);
-        assert_eq!((app.active, app.workspaces.len()), (1, 2));
-        assert_eq!(app.panes.len(), 2, "the closed workspace's shell is gone");
-        assert!(app.pane_order().iter().all(|id| app.panes.contains_key(id)));
+        answer(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspaces.len(), 3, "Esc keeps it");
+
+        app.request_close_workspace(2);
+        answer(&mut app, KeyCode::Char('y'));
+        assert_eq!(
+            (app.active, app.workspaces.len()),
+            (1, 2),
+            "y closes it and moves to a neighbour"
+        );
+        assert_eq!(app.panes.len(), 2, "its shell is gone");
 
         app.request_close_workspace(0);
-        app.request_close_workspace(0);
+        answer(&mut app, KeyCode::Right); // choose Yes
+        answer(&mut app, KeyCode::Enter);
         assert_eq!(
             (app.active, app.workspaces.len()),
             (0, 1),
@@ -1497,12 +1608,109 @@ mod tests {
         );
 
         app.request_close_workspace(0);
+        assert!(app.overlay.is_none(), "no dialog for the only workspace");
         assert!(
             app.notice.as_deref().is_some_and(|n| n.contains("only workspace")),
             "{:?}",
             app.notice
         );
-        assert_eq!(app.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn a_confirmed_workspace_close_survives_the_layout_changing() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.new_workspace();
+        app.rename_workspace(2, "last").unwrap();
+        app.request_close_workspace(2);
+        // While the dialog is open an earlier workspace goes away (its shell exited).
+        app.remove_workspace(0);
+        assert_eq!(app.workspaces.iter().position(|w| w.name == "last"), Some(1));
+        answer(&mut app, KeyCode::Char('y'));
+        let names: Vec<_> = app.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert!(!names.contains(&"last"), "closed the workspace that was asked about: {names:?}");
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_terminal_pane_asks_first() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.run_action(KeyAction::SplitRight);
+        let target = app.pane_order()[1];
+        assert!(matches!(app.panes[&target], Pane::Terminal(_)));
+
+        app.run_action(KeyAction::ClosePane);
+        assert!(confirm_text(&app).contains("Close terminal pane"), "{}", confirm_text(&app));
+        assert!(!confirm_text(&app).contains("last pane"), "two panes here");
+        answer(&mut app, KeyCode::Char('n'));
+        assert!(app.panes.contains_key(&target), "declined");
+
+        app.run_action(KeyAction::ClosePane);
+        answer(&mut app, KeyCode::Char('y'));
+        assert!(!app.panes.contains_key(&target), "confirmed");
+        assert_eq!(app.pane_order().len(), 1);
+    }
+
+    #[test]
+    fn the_prompt_says_when_closing_ends_a_workspace_or_the_session() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.run_action(KeyAction::ClosePane); // the only pane of workspace 2
+        assert!(confirm_text(&app).contains("workspace"), "{}", confirm_text(&app));
+        answer(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.workspaces.len(), 1, "the workspace closed with its last pane");
+
+        // A shell as the very last pane of the session.
+        let id = app.next_id;
+        app.next_id += 1;
+        let shell = Terminal::spawn(&app.ws_root(), 24, 80, &pane_env("t", id)).unwrap();
+        app.panes.clear();
+        app.panes.insert(id, Pane::Terminal(shell));
+        app.tree = Node::Leaf(id);
+        app.focus = id;
+        app.request_close(id);
+        assert!(confirm_text(&app).contains("session will end"), "{}", confirm_text(&app));
+        answer(&mut app, KeyCode::Char('y'));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn panes_that_hold_nothing_close_without_a_prompt() {
+        let (_d, mut app) = light_app();
+        app.run_action(KeyAction::OpenFiles);
+        let files = app.focus;
+        app.run_action(KeyAction::ClosePane);
+        assert!(app.overlay.is_none());
+        assert!(!app.panes.contains_key(&files));
+        assert!(app.panes.contains_key(&0), "the graph pane remains");
+    }
+
+    #[test]
+    fn unsaved_editors_prompt_and_clean_ones_do_not() {
+        let (_d, mut app, file, _other) = setup();
+        // A graph pane first, so the viewer is never the workspace's last pane.
+        let dir = file.parent().unwrap().to_path_buf();
+        app.panes.insert(0, Pane::Graph(Box::new(GraphView::new(&dir))));
+
+        app.open_file(file.clone(), false);
+        let viewer = app.focus;
+        app.run_action(KeyAction::ClosePane);
+        assert!(app.overlay.is_none(), "a clean viewer closes at once");
+        assert!(!app.panes.contains_key(&viewer));
+
+        app.open_file(file, true);
+        let editor = app.focus;
+        if let Some(Pane::Editor(v)) = app.panes.get_mut(&editor) {
+            v.paste("changed ");
+        }
+        app.run_action(KeyAction::ClosePane);
+        assert!(confirm_text(&app).contains("Unsaved changes"), "{}", confirm_text(&app));
+        answer(&mut app, KeyCode::Char('n'));
+        assert!(app.panes.contains_key(&editor), "declined");
+        app.run_action(KeyAction::ClosePane);
+        answer(&mut app, KeyCode::Char('y'));
+        assert!(!app.panes.contains_key(&editor), "confirmed");
     }
 
     #[test]
@@ -1543,6 +1751,30 @@ mod tests {
         app.run_action(KeyAction::GotoWorkspace(9));
         assert_eq!(app.active, 2, "out of range keeps the workspace");
         assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn goto_pane_stays_inside_the_current_workspace() {
+        let (_d, mut app) = light_app();
+        app.new_workspace();
+        app.run_action(KeyAction::SplitRight);
+        app.run_action(KeyAction::SplitDown); // three panes in workspace 2
+        let order = app.pane_order();
+        assert_eq!(order.len(), 3);
+
+        app.run_action(KeyAction::GotoPane(1));
+        assert_eq!(app.focus, order[0]);
+        app.run_action(KeyAction::GotoPane(3));
+        assert_eq!(app.focus, order[2]);
+        assert_eq!(app.active, 1, "never leaves the workspace");
+
+        app.run_action(KeyAction::GotoPane(4));
+        assert_eq!(app.focus, order[2], "out of range keeps focus");
+        assert!(app.notice.as_deref().is_some_and(|n| n.contains("no pane 4")), "{:?}", app.notice);
+
+        // The same digit means a workspace when it comes with ctrl.
+        app.run_action(KeyAction::GotoWorkspace(1));
+        assert_eq!(app.active, 0);
     }
 
     #[test]

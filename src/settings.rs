@@ -26,20 +26,23 @@ pub struct ProviderRow {
     /// The variable that is set, if any.
     pub set_var: Option<&'static str>,
     pub vars: &'static [&'static str],
+    /// Where the provider shows usage, limits and billing. yurlungr never calls
+    /// these; they are here so you know where to look.
+    pub dashboard: &'static str,
 }
 
-/// (provider, environment variables that hold its API key)
-const PROVIDERS: &[(&str, &[&str])] = &[
-    ("Anthropic", &["ANTHROPIC_API_KEY"]),
-    ("OpenAI", &["OPENAI_API_KEY"]),
-    ("Google Gemini", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
-    ("DeepSeek", &["DEEPSEEK_API_KEY"]),
-    ("Moonshot / Kimi", &["MOONSHOT_API_KEY", "KIMI_API_KEY"]),
-    ("Alibaba Qwen", &["DASHSCOPE_API_KEY"]),
-    ("OpenRouter", &["OPENROUTER_API_KEY"]),
-    ("Mistral", &["MISTRAL_API_KEY"]),
-    ("Groq", &["GROQ_API_KEY"]),
-    ("xAI", &["XAI_API_KEY"]),
+/// (provider, environment variables that hold its API key, usage dashboard)
+const PROVIDERS: &[(&str, &[&str], &str)] = &[
+    ("Anthropic", &["ANTHROPIC_API_KEY"], "console.anthropic.com/settings/usage"),
+    ("OpenAI", &["OPENAI_API_KEY"], "platform.openai.com/usage"),
+    ("Google Gemini", &["GEMINI_API_KEY", "GOOGLE_API_KEY"], "aistudio.google.com/usage"),
+    ("DeepSeek", &["DEEPSEEK_API_KEY"], "platform.deepseek.com/usage"),
+    ("Moonshot / Kimi", &["MOONSHOT_API_KEY", "KIMI_API_KEY"], "platform.moonshot.ai"),
+    ("Alibaba Qwen", &["DASHSCOPE_API_KEY"], "dashscope.console.aliyun.com"),
+    ("OpenRouter", &["OPENROUTER_API_KEY"], "openrouter.ai/activity"),
+    ("Mistral", &["MISTRAL_API_KEY"], "console.mistral.ai/usage"),
+    ("Groq", &["GROQ_API_KEY"], "console.groq.com/settings/limits"),
+    ("xAI", &["XAI_API_KEY"], "console.x.ai"),
 ];
 
 pub struct Snapshot {
@@ -63,10 +66,11 @@ pub fn gather(session: &str, theme: &str, key_overrides: usize, warnings: &[Stri
 
     let providers = PROVIDERS
         .iter()
-        .map(|&(name, vars)| ProviderRow {
+        .map(|&(name, vars, dashboard)| ProviderRow {
             name,
             set_var: vars.iter().copied().find(|v| env::var_os(v).is_some_and(|x| !x.is_empty())),
             vars,
+            dashboard,
         })
         .collect();
 
@@ -83,7 +87,7 @@ pub fn gather(session: &str, theme: &str, key_overrides: usize, warnings: &[Stri
         ("session".to_string(), session.to_string()),
         ("theme".to_string(), theme.to_string()),
         ("config file".to_string(), format!("{} ({config_state})", show(config_path))),
-        ("custom keybindings".to_string(), key_overrides.to_string()),
+        ("custom keys".to_string(), key_overrides.to_string()),
         ("state dir".to_string(), show(proto::data_dir().ok())),
     ];
     for w in warnings {

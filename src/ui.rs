@@ -164,7 +164,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let th = app.theme;
     let body_h = area.height - 1;
-    let spaces_h = (app.workspaces.len() as u16 + 2).clamp(4, (body_h * 2 / 5).max(4));
+    // Spaces and agents each get half of the height (the button row is the odd one out).
+    let spaces_h = body_h / 2;
     let [spaces_area, agents_area, buttons_area] =
         Layout::vertical([Constraint::Length(spaces_h), Constraint::Min(3), Constraint::Length(1)])
             .areas(area);
@@ -353,11 +354,12 @@ fn status_line(app: &App) -> String {
     }
     let (working, blocked, idle) = app.status_counts();
     format!(
-        " {} prefix · split {} {} {} · space {} · menu: {} · {working} working · {blocked} blocked · {idle} idle{}",
+        " {} prefix · split {} {} {} · pane {} · space {} · menu: {} · {working} working · {blocked} blocked · {idle} idle{}",
         km.prefix.format(),
         km.hint(Action::SplitLeft),
         km.hint(Action::SplitRight),
         km.hint(Action::SplitDown),
+        km.hint(Action::GotoPane(1)).replace('1', "N"),
         km.hint(Action::GotoWorkspace(1)).replace('1', "N"),
         km.hint(Action::OpenMenu),
         if app.zoomed.is_some() { " · zoomed" } else { "" }

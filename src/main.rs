@@ -17,6 +17,7 @@ mod overlay;
 mod proto;
 mod server;
 mod settings;
+mod settings_dialog;
 mod terminal;
 mod theme;
 mod ui;

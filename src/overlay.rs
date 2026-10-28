@@ -12,9 +12,9 @@ use ratatui::{
 
 use crate::{
     app::App,
-    integration::{Action as HookAction, Auth},
     keymap::{Action, Chord, KeyCombo, Keymap},
-    settings::Snapshot,
+    layout::PaneId,
+    settings_dialog::SettingsDialog,
     theme::{self, Theme},
 };
 
@@ -23,6 +23,7 @@ pub enum Overlay {
     Settings(SettingsDialog),
     Themes(ThemePicker),
     Name(NameInput),
+    Confirm(Confirm),
 }
 
 impl Overlay {
@@ -33,6 +34,22 @@ impl Overlay {
             Overlay::Settings(d) => d.key(app, key),
             Overlay::Themes(d) => d.key(app, key),
             Overlay::Name(d) => d.key(app, key),
+            Overlay::Confirm(d) => d.key(app, key),
+        }
+    }
+
+    /// Called every server tick so a dialog can pick up background results.
+    pub fn poll(&mut self) {
+        if let Overlay::Settings(d) = self {
+            d.poll();
+        }
+    }
+
+    /// A left click at a screen position; returns false when the dialog should close.
+    pub fn click(&mut self, app: &mut App, x: u16, y: u16) -> bool {
+        match self {
+            Overlay::Confirm(d) => d.click(app, x, y),
+            _ => true,
         }
     }
 
@@ -40,24 +57,21 @@ impl Overlay {
     pub fn scroll(&mut self, delta: isize) {
         match self {
             Overlay::Keybinds(d) => d.step(delta),
-            Overlay::Settings(d) => {
-                d.scroll = (d.scroll as isize + delta).max(0) as usize;
-                d.follow = false;
-            }
-            Overlay::Themes(_) | Overlay::Name(_) => {}
+            Overlay::Settings(d) => d.scroll_by(delta),
+            Overlay::Themes(_) | Overlay::Name(_) | Overlay::Confirm(_) => {}
         }
     }
 }
 
 /// A box centred in the screen, leaving the dock and status rows visible.
-fn centered(area: Rect, max_w: u16, max_h: u16) -> Rect {
+pub(crate) fn centered(area: Rect, max_w: u16, max_h: u16) -> Rect {
     let usable = area.height.saturating_sub(2);
     let w = area.width.saturating_sub(2).min(max_w);
     let h = usable.saturating_sub(2).min(max_h);
     Rect::new(area.x + (area.width - w) / 2, area.y + (usable - h) / 2, w, h)
 }
 
-fn frame(f: &mut Frame, area: Rect, title: &str, th: &Theme) -> Rect {
+pub(crate) fn frame(f: &mut Frame, area: Rect, title: &str, th: &Theme) -> Rect {
     let block =
         Block::bordered().title(format!(" {title} ")).border_style(Style::new().fg(th.accent));
     let inner = block.inner(area);
@@ -66,12 +80,12 @@ fn frame(f: &mut Frame, area: Rect, title: &str, th: &Theme) -> Rect {
     inner
 }
 
-fn reversed() -> Style {
+pub(crate) fn reversed() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }
 
 /// Keep `selected` inside the window starting at `scroll`.
-fn keep_visible(scroll: &mut usize, selected: usize, height: usize) {
+pub(crate) fn keep_visible(scroll: &mut usize, selected: usize, height: usize) {
     if selected < *scroll {
         *scroll = selected;
     } else if height > 0 && selected >= *scroll + height {
@@ -275,160 +289,6 @@ pub fn draw_keybinds(f: &mut Frame, d: &mut Keybinds, th: &Theme, keymap: &Keyma
     );
 }
 
-// ---- settings ----------------------------------------------------------------
-
-pub struct SettingsDialog {
-    snap: Snapshot,
-    selected: usize,
-    pub scroll: usize,
-    follow: bool,
-    message: Option<String>,
-}
-
-impl SettingsDialog {
-    pub fn new(snap: Snapshot) -> Self {
-        Self { snap, selected: 0, scroll: 0, follow: true, message: None }
-    }
-
-    fn key(&mut self, app: &mut App, key: KeyEvent) -> bool {
-        let last = self.snap.agents.len().saturating_sub(1);
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return false,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
-                self.follow = true;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(last);
-                self.follow = true;
-            }
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(8);
-                self.follow = false;
-            }
-            KeyCode::PageDown => {
-                self.scroll += 8;
-                self.follow = false;
-            }
-            KeyCode::Char('r') => {
-                self.snap = app.settings_snapshot();
-                self.message = Some("refreshed".into());
-            }
-            KeyCode::Char(c @ ('i' | 'u')) => {
-                let agent = self.snap.agents[self.selected].agent;
-                let action = if c == 'i' { HookAction::Install } else { HookAction::Uninstall };
-                self.message = Some(match agent.apply(action) {
-                    Ok(msg) => format!("{}: {msg}", agent.label()),
-                    Err(e) => format!("{}: {e:#}", agent.label()),
-                });
-                self.snap = app.settings_snapshot();
-            }
-            _ => {}
-        }
-        true
-    }
-}
-
-pub fn draw_settings(f: &mut Frame, d: &mut SettingsDialog, th: &Theme) {
-    let area = centered(f.area(), 110, 44);
-    let inner = frame(f, area, "Settings", th);
-    let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
-
-    let heading = |text: &str| {
-        Line::from(Span::styled(format!(" {text}"), Style::new().fg(th.accent).bold()))
-    };
-    let ok = |text: String| Span::styled(text, Style::new().fg(th.working));
-    let warn = |text: String| Span::styled(text, Style::new().fg(th.blocked));
-    let no = |text: String| Span::styled(text, Style::new().fg(th.dim));
-    let bad = |text: String| Span::styled(text, Style::new().fg(th.danger));
-
-    let mut lines: Vec<Line> = Vec::new();
-    let mut selected_line = 0;
-    lines.push(heading("Agents: hooks and login"));
-    for (i, row) in d.snap.agents.iter().enumerate() {
-        let on = i == d.selected;
-        if on {
-            selected_line = lines.len();
-        }
-        let binary = match &row.binary {
-            Some(_) => ok("installed    ".into()),
-            None => no("not on PATH  ".into()),
-        };
-        let hooks = match &row.hooks {
-            Ok(true) => ok("hooks installed    ".into()),
-            Ok(false) => warn("hooks not installed".into()),
-            Err(_) => bad("hooks: error       ".into()),
-        };
-        let login = match &row.auth {
-            Auth::LoggedIn(_) => ok("  login found".into()),
-            Auth::NotFound => no("  no login found".into()),
-            Auth::Unknown => no("  login: n/a".into()),
-        };
-        let mut name =
-            Span::raw(format!(" {} {:<15}", if on { ">" } else { " " }, row.agent.label()));
-        if on {
-            name = name.style(reversed());
-        }
-        lines.push(Line::from(vec![name, Span::raw(" "), binary, Span::raw(" "), hooks, login]));
-        if on {
-            let dim = Style::new().fg(th.dim);
-            if let Some(p) = &row.binary {
-                lines
-                    .push(Line::from(Span::styled(format!("       binary: {}", p.display()), dim)));
-            }
-            if let Some(p) = &row.config {
-                lines
-                    .push(Line::from(Span::styled(format!("       config: {}", p.display()), dim)));
-            }
-            if let Err(e) = &row.hooks {
-                lines.push(Line::from(bad(format!("       {e}"))));
-            }
-            if let Auth::LoggedIn(p) = &row.auth {
-                lines.push(Line::from(Span::styled(
-                    format!("       login file: {}", p.display()),
-                    dim,
-                )));
-            }
-        }
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(heading("LLM providers: API keys in the session's environment"));
-    for p in &d.snap.providers {
-        let status = match p.set_var {
-            Some(var) => ok(format!("set ({var})")),
-            None => no(format!("not set ({})", p.vars.join(" / "))),
-        };
-        lines.push(Line::from(vec![Span::raw(format!("     {:<18}", p.name)), status]));
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(heading("yurlungr"));
-    for (label, value) in &d.snap.info {
-        let value =
-            if label == "config warning" { warn(value.clone()) } else { Span::raw(value.clone()) };
-        lines.push(Line::from(vec![
-            Span::styled(format!("     {label:<20}"), Style::new().fg(th.dim)),
-            value,
-        ]));
-    }
-
-    let height = body.height as usize;
-    if d.follow {
-        keep_visible(&mut d.scroll, selected_line, height);
-        keep_visible(&mut d.scroll, (selected_line + 4).min(lines.len().saturating_sub(1)), height);
-    }
-    d.scroll = d.scroll.min(lines.len().saturating_sub(height));
-    f.render_widget(Paragraph::new(lines).scroll((d.scroll as u16, 0)), body);
-
-    let status = match &d.message {
-        Some(m) => Span::styled(format!(" {m}"), Style::new().fg(th.marker)),
-        None => Span::styled(" Only existence of login files and API-key variables is checked; secrets are never read.", Style::new().fg(th.dim)),
-    };
-    let hints = Span::styled(" j/k select · i install hooks · u uninstall hooks · r refresh · PgUp/PgDn scroll · Esc close", Style::new().fg(th.dim));
-    f.render_widget(Paragraph::new(vec![Line::from(status), Line::from(hints)]), footer);
-}
-
 // ---- themes ------------------------------------------------------------------
 
 pub struct ThemePicker {
@@ -492,9 +352,10 @@ pub fn draw_themes(f: &mut Frame, d: &ThemePicker, th: &Theme) {
 pub fn draw(f: &mut Frame, overlay: &mut Overlay, th: &Theme, keymap: &Keymap) {
     match overlay {
         Overlay::Keybinds(d) => draw_keybinds(f, d, th, keymap),
-        Overlay::Settings(d) => draw_settings(f, d, th),
+        Overlay::Settings(d) => crate::settings_dialog::draw(f, d, th),
         Overlay::Themes(d) => draw_themes(f, d, th),
         Overlay::Name(d) => draw_name(f, d, th),
+        Overlay::Confirm(d) => draw_confirm(f, d, th),
     }
 }
 
@@ -554,6 +415,119 @@ pub fn draw_name(f: &mut Frame, d: &NameInput, th: &Theme) {
     }
     f.render_widget(
         Paragraph::new(" Enter save · Esc cancel").style(Style::new().fg(th.dim)),
+        hint,
+    );
+}
+
+// ---- confirmation ------------------------------------------------------------
+
+/// What happens when a confirmation is accepted. A workspace is named, not
+/// numbered, so a workspace that disappears while the dialog is open cannot
+/// make the answer apply to the wrong one.
+#[derive(Clone)]
+pub enum ConfirmAction {
+    ClosePane(PaneId),
+    CloseWorkspace(String),
+}
+
+/// A yes/no question. "No" is selected first, so Enter alone never destroys anything;
+/// `y` answers yes straight away.
+pub struct Confirm {
+    title: String,
+    lines: Vec<String>,
+    action: ConfirmAction,
+    yes: &'static str,
+    yes_selected: bool,
+    yes_rect: Rect,
+    no_rect: Rect,
+}
+
+impl Confirm {
+    pub fn new(
+        title: impl Into<String>,
+        lines: Vec<String>,
+        action: ConfirmAction,
+        yes: &'static str,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            lines,
+            action,
+            yes,
+            yes_selected: false,
+            yes_rect: Rect::default(),
+            no_rect: Rect::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[cfg(test)]
+    pub fn text(&self) -> String {
+        self.lines.join(" ")
+    }
+
+    fn key(&mut self, app: &mut App, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => app.run_confirmed(self.action.clone()),
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {}
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Char('h' | 'l') => {
+                self.yes_selected = !self.yes_selected;
+                return true;
+            }
+            KeyCode::Enter => {
+                if self.yes_selected {
+                    app.run_confirmed(self.action.clone());
+                }
+            }
+            _ => return true,
+        }
+        false
+    }
+
+    fn click(&mut self, app: &mut App, x: u16, y: u16) -> bool {
+        let at = ratatui::layout::Position::new(x, y);
+        if self.yes_rect.contains(at) {
+            app.run_confirmed(self.action.clone());
+            false
+        } else {
+            !self.no_rect.contains(at)
+        }
+    }
+}
+
+pub fn draw_confirm(f: &mut Frame, d: &mut Confirm, th: &Theme) {
+    let area = centered(f.area(), 66, d.lines.len() as u16 + 6);
+    let inner = frame(f, area, &d.title, th);
+    let [text, buttons, hint] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+            .areas(inner);
+
+    let body: Vec<Line> = d.lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
+    f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), text);
+
+    let yes = format!(" {} (y) ", d.yes);
+    let no = " Keep it (n) ".to_string();
+    d.yes_rect = Rect::new(buttons.x + 2, buttons.y, yes.chars().count() as u16, 1);
+    d.no_rect = Rect::new(d.yes_rect.right() + 2, buttons.y, no.chars().count() as u16, 1);
+    let chosen = Style::new().fg(th.danger).add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let kept = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let idle = Style::new().fg(th.dim);
+    f.render_widget(
+        Paragraph::new(yes).style(if d.yes_selected { chosen } else { idle }),
+        d.yes_rect,
+    );
+    f.render_widget(Paragraph::new(no).style(if d.yes_selected { idle } else { kept }), d.no_rect);
+    f.render_widget(
+        Paragraph::new(" y close · n or Esc keep · ←/→ choose · Enter confirm")
+            .style(Style::new().fg(th.dim)),
         hint,
     );
 }
