@@ -18,7 +18,6 @@ use crossterm::{
         PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::supports_keyboard_enhancement,
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -79,20 +78,17 @@ pub fn attach(session: &str, root: &Path) -> Result<()> {
     let mut terminal = ratatui::init();
     let size = terminal.size()?;
     let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
-    // Ctrl+<digit> (jump to pane) cannot be told apart from the bare digit
-    // without the kitty keyboard protocol. Terminals that lack it keep
-    // working: the same actions are bound to prefix + digit.
-    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
-    if enhanced {
-        let _ = execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-    }
+    // Ctrl+Tab cannot be told apart from Tab without the kitty keyboard
+    // protocol. The request is sent unconditionally rather than gated on a
+    // support query: that query can time out or go unanswered (SSH, slow
+    // terminals) and would silently disable the keys. Terminals without the
+    // protocol ignore it; next pane is also bound to prefix + o / Tab.
+    let _ = execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let result = run(&mut stream, &mut terminal, token, size.width, size.height);
-    if enhanced {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-    }
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
 
