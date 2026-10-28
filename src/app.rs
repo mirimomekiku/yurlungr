@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant, SystemTime},
+};
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -9,20 +14,30 @@ use ratatui::{layout::Rect, widgets::Block};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::{self, Config},
+    editor::{EditorView, Mode},
+    keymap::{Action, KeyCombo, Scope},
     keys::key_bytes,
     layout::{Dir, Divider, Node, PaneId},
     menu::{Menu, MenuAction},
     mouse,
+    overlay::{Keybinds, Overlay, SettingsDialog, ThemePicker},
     proto::ReportState,
+    settings,
     terminal::{Status, Terminal},
-    views::{FilesView, GraphView, Pane},
+    theme::{self, Theme},
+    views::{Clip, FilesAct, FilesView, GraphView, Pane},
 };
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+/// How often the config file is checked for outside edits.
+const CONFIG_POLL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Kind {
     Terminal,
     Graph,
     Files,
+    Editor(PathBuf),
 }
 
 fn kind_of(p: &Pane) -> Kind {
@@ -30,7 +45,16 @@ fn kind_of(p: &Pane) -> Kind {
         Pane::Terminal(_) => Kind::Terminal,
         Pane::Graph(_) => Kind::Graph,
         Pane::Files(_) => Kind::Files,
+        Pane::Editor(v) => Kind::Editor(v.path.clone()),
     }
+}
+
+/// A clickable region of the dock.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DockHit {
+    Pane(PaneId),
+    New,
+    Menu,
 }
 
 /// What is written to disk so a new server can rebuild the layout. Processes
@@ -97,11 +121,23 @@ pub struct App {
     next_id: PaneId,
     pub focus: PaneId,
     pub zoomed: Option<PaneId>,
-    /// True after the prefix key (Ctrl+B) until the next key press.
+    /// True after the prefix key until the next key press.
     pub prefix: bool,
     pub menu: Option<Menu>,
+    /// The open dialog (keybindings, settings or theme picker), if any.
+    pub overlay: Option<Overlay>,
+    pub config: Config,
+    pub theme: Theme,
+    config_mtime: Option<SystemTime>,
+    config_checked: Instant,
     pub notice: Option<String>,
     pub rects: Vec<(PaneId, Rect)>,
+    /// Click targets of the bottom dock, filled in by the renderer.
+    pub dock: Vec<(Rect, DockHit)>,
+    /// Copy/cut marker shared by all file browsers.
+    pub file_clip: Option<Clip>,
+    /// An editor with unsaved changes whose close was refused once already.
+    pending_close: Option<PaneId>,
     dividers: Vec<Divider>,
     drag: Option<Drag>,
     pub sel: Option<Selection>,
@@ -117,7 +153,15 @@ pub struct App {
 
 impl App {
     fn blank(root: PathBuf, layout_file: Option<PathBuf>, session: &str) -> Self {
+        let mut config = Config::load();
+        let (theme, warnings) = theme::resolve(&config.theme, &config.colors);
+        config.warnings.extend(warnings);
         Self {
+            overlay: None,
+            config,
+            theme,
+            config_mtime: config::modified(),
+            config_checked: Instant::now(),
             root,
             session: session.to_string(),
             panes: HashMap::new(),
@@ -129,6 +173,9 @@ impl App {
             menu: None,
             notice: None,
             rects: Vec::new(),
+            dock: Vec::new(),
+            file_clip: None,
+            pending_close: None,
             dividers: Vec::new(),
             drag: None,
             sel: None,
@@ -172,6 +219,7 @@ impl App {
                     .map(Pane::Terminal),
                 Kind::Graph => Some(Pane::Graph(GraphView::new(&saved.root))),
                 Kind::Files => FilesView::new(saved.root.clone()).ok().map(Pane::Files),
+                Kind::Editor(path) => EditorView::open(&path).ok().map(Pane::Editor),
             };
             match pane {
                 Some(p) => {
@@ -260,6 +308,12 @@ impl App {
     // ---- pane management -------------------------------------------------
 
     fn open(&mut self, kind: Kind, dir: Dir) {
+        self.open_at(kind, dir, false);
+    }
+
+    /// Split the focused pane with a new one placed after it, or before it
+    /// (left or above) when `before` is set.
+    fn open_at(&mut self, kind: Kind, dir: Dir, before: bool) {
         let id = self.next_id;
         let pane = match kind {
             Kind::Terminal => {
@@ -279,14 +333,57 @@ impl App {
                     return;
                 }
             },
+            Kind::Editor(path) => match EditorView::open(&path) {
+                Ok(v) => Pane::Editor(v),
+                Err(e) => {
+                    self.notice = Some(format!("cannot open {}: {e}", path.display()));
+                    return;
+                }
+            },
         };
         self.next_id += 1;
-        if self.tree.split(self.focus, id, dir) {
+        if self.tree.split(self.focus, id, dir, before) {
             self.panes.insert(id, pane);
             self.focus = id;
             self.zoomed = None;
             self.sel = None;
         }
+    }
+
+    /// Show `path` in an editor pane, reusing one that already has it open.
+    fn open_file(&mut self, path: PathBuf, edit: bool) {
+        let existing = self
+            .panes
+            .iter()
+            .find_map(|(id, p)| matches!(p, Pane::Editor(v) if v.path == path).then_some(*id));
+        match existing {
+            Some(id) => self.focus = id,
+            None => self.open(Kind::Editor(path), Dir::Horizontal),
+        }
+        if let Some(Pane::Editor(v)) = self.panes.get_mut(&self.focus) {
+            if edit {
+                v.mode = Mode::Edit;
+            }
+        }
+    }
+
+    /// Close a pane, but make the user confirm once if an editor has unsaved changes.
+    fn request_close(&mut self, id: PaneId) {
+        let unsaved = matches!(self.panes.get(&id), Some(Pane::Editor(v)) if v.dirty);
+        if unsaved && self.pending_close != Some(id) {
+            self.pending_close = Some(id);
+            self.notice = Some("unsaved changes: close again to discard them".to_string());
+            return;
+        }
+        self.pending_close = None;
+        self.close(id);
+    }
+
+    /// Pane ids in layout order.
+    pub fn pane_order(&self) -> Vec<PaneId> {
+        let mut ids = Vec::new();
+        self.tree.ids(&mut ids);
+        ids
     }
 
     fn close(&mut self, id: PaneId) {
@@ -330,11 +427,29 @@ impl App {
         self.zoomed = if self.zoomed.is_some() { None } else { Some(self.focus) };
     }
 
-    fn cycle_focus(&mut self) {
-        let mut ids = Vec::new();
-        self.tree.ids(&mut ids);
+    fn cycle_focus(&mut self, back: bool) {
+        let ids = self.pane_order();
         if let Some(i) = ids.iter().position(|&id| id == self.focus) {
-            self.focus = ids[(i + 1) % ids.len()];
+            let n = ids.len();
+            self.focus = ids[(i + if back { n - 1 } else { 1 }) % n];
+            if self.zoomed.is_some() {
+                self.zoomed = Some(self.focus);
+            }
+            self.sel = None;
+        }
+    }
+
+    /// Jump to the n-th pane (1-based, in dock order).
+    fn goto_pane(&mut self, n: u8) {
+        match self.pane_order().get(n as usize - 1) {
+            Some(&id) => {
+                self.focus = id;
+                if self.zoomed.is_some() {
+                    self.zoomed = Some(id);
+                }
+                self.sel = None;
+            }
+            None => self.notice = Some(format!("there is no pane {n}")),
         }
     }
 
@@ -380,8 +495,9 @@ impl App {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k)?,
             Event::Mouse(m) => self.on_mouse(m)?,
-            Event::Paste(s) => {
-                if let Some(Pane::Terminal(t)) = self.panes.get(&self.focus) {
+            Event::Paste(_) if self.overlay.is_some() => {}
+            Event::Paste(s) => match self.panes.get_mut(&self.focus) {
+                Some(Pane::Terminal(t)) => {
                     let bracketed = t.with_screen(|s| s.bracketed_paste());
                     if bracketed {
                         t.write(b"\x1b[200~");
@@ -391,7 +507,10 @@ impl App {
                         t.write(b"\x1b[201~");
                     }
                 }
-            }
+                Some(Pane::Editor(v)) => v.paste(&s),
+                Some(Pane::Files(v)) => v.paste_text(&s),
+                _ => {}
+            },
             _ => {}
         }
         Ok(())
@@ -400,6 +519,15 @@ impl App {
     fn on_key(&mut self, key: KeyEvent) -> Result<()> {
         self.notice = None;
         self.sel = None;
+
+        if let Some(mut overlay) = self.overlay.take() {
+            if overlay.key(self, key) {
+                // The dialog may have opened another one (it cannot today), so
+                // only restore it if the slot is still empty.
+                self.overlay.get_or_insert(overlay);
+            }
+            return Ok(());
+        }
 
         if let Some(mut menu) = self.menu.take() {
             let n = menu.items.len();
@@ -419,18 +547,32 @@ impl App {
             return Ok(());
         }
 
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let combo = KeyCombo::from_event(key);
+        let is_prefix_key = combo == self.config.keymap.prefix;
+        if !self.prefix && !is_prefix_key {
+            self.pending_close = None;
+        }
+        let scope = self.focus_scope();
+
         if self.prefix {
             self.prefix = false;
-            if ctrl && key.code == KeyCode::Char('b') {
-                self.send_to_focus(&[0x02]);
-            } else {
-                self.on_prefix(key.code);
+            if is_prefix_key {
+                // Prefix twice sends the key itself to the program in the pane.
+                let app_cursor = self.focused_app_cursor();
+                self.send_to_focus(&key_bytes(key, app_cursor));
+            } else if let Some(action) = self.config.keymap.lookup(true, combo, scope) {
+                self.run_action(action);
             }
             return Ok(());
         }
-        if ctrl && key.code == KeyCode::Char('b') {
+        if is_prefix_key {
             self.prefix = true;
+            return Ok(());
+        }
+
+        // Direct bindings that work from any pane (split, jump to pane, ...).
+        if let Some(action) = self.config.keymap.lookup(false, combo, Scope::Global) {
+            self.run_action(action);
             return Ok(());
         }
 
@@ -442,13 +584,55 @@ impl App {
             }
             Some(Pane::Graph(v)) => v.key(key.code),
             Some(Pane::Files(v)) => {
-                if let Err(e) = v.key(key.code) {
-                    self.notice = Some(e.to_string());
+                // While a prompt is open every key is text, never a command.
+                let cmd = if v.prompt.is_some() {
+                    None
+                } else {
+                    self.config.keymap.lookup(false, combo, Scope::Files)
+                };
+                match v.key(key.code, cmd, &mut self.file_clip) {
+                    Ok(act) => self.files_act(act),
+                    Err(e) => self.notice = Some(e.to_string()),
+                }
+            }
+            Some(Pane::Editor(v)) => {
+                let cmd = self
+                    .config
+                    .keymap
+                    .lookup(false, combo, Scope::Editor)
+                    .filter(|a| v.accepts(*a));
+                match v.key(key, cmd) {
+                    Ok(msg) => self.notice = msg,
+                    Err(e) => self.notice = Some(e.to_string()),
                 }
             }
             None => {}
         }
         Ok(())
+    }
+
+    /// The keymap scope of the focused pane.
+    pub fn focus_scope(&self) -> Scope {
+        match self.panes.get(&self.focus) {
+            Some(Pane::Files(_)) => Scope::Files,
+            Some(Pane::Editor(_)) => Scope::Editor,
+            _ => Scope::Global,
+        }
+    }
+
+    fn focused_app_cursor(&self) -> bool {
+        match self.panes.get(&self.focus) {
+            Some(Pane::Terminal(t)) => t.with_screen(|s| s.application_cursor()),
+            _ => false,
+        }
+    }
+
+    fn files_act(&mut self, act: FilesAct) {
+        match act {
+            FilesAct::None => {}
+            FilesAct::Msg(m) => self.notice = Some(m),
+            FilesAct::Open { path, edit } => self.open_file(path, edit),
+        }
     }
 
     fn send_to_focus(&mut self, bytes: &[u8]) {
@@ -457,28 +641,98 @@ impl App {
         }
     }
 
-    fn on_prefix(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char('%' | '|' | 'v') => self.open(Kind::Terminal, Dir::Horizontal),
-            KeyCode::Char('"' | '-' | 's') => self.open(Kind::Terminal, Dir::Vertical),
-            KeyCode::Char('c') => self.open(Kind::Terminal, Dir::Horizontal),
-            KeyCode::Char('g') => self.open(Kind::Graph, Dir::Horizontal),
-            KeyCode::Char('f') => self.open(Kind::Files, Dir::Horizontal),
-            KeyCode::Char('x') => self.close(self.focus),
-            KeyCode::Char('z') => self.toggle_zoom(),
-            KeyCode::Char('o') | KeyCode::Tab => self.cycle_focus(),
-            KeyCode::Left | KeyCode::Char('h') => self.focus_dir(-1, 0),
-            KeyCode::Right | KeyCode::Char('l') => self.focus_dir(1, 0),
-            KeyCode::Up | KeyCode::Char('k') => self.focus_dir(0, -1),
-            KeyCode::Down | KeyCode::Char('j') => self.focus_dir(0, 1),
-            KeyCode::Char('H') => self.tree.nudge(self.focus, Dir::Horizontal, -0.05),
-            KeyCode::Char('L') => self.tree.nudge(self.focus, Dir::Horizontal, 0.05),
-            KeyCode::Char('K') => self.tree.nudge(self.focus, Dir::Vertical, -0.05),
-            KeyCode::Char('J') => self.tree.nudge(self.focus, Dir::Vertical, 0.05),
-            KeyCode::Char('d') => self.detach = true,
-            KeyCode::Char('q') => self.quit = true,
+    fn run_action(&mut self, action: Action) {
+        match action {
+            Action::SplitLeft => self.open_at(Kind::Terminal, Dir::Horizontal, true),
+            Action::SplitRight | Action::NewTerminal => self.open(Kind::Terminal, Dir::Horizontal),
+            Action::SplitDown => self.open(Kind::Terminal, Dir::Vertical),
+            Action::OpenGraph => self.open(Kind::Graph, Dir::Horizontal),
+            Action::OpenFiles => self.open(Kind::Files, Dir::Horizontal),
+            Action::ClosePane => self.request_close(self.focus),
+            Action::ZoomPane => self.toggle_zoom(),
+            Action::NextPane => self.cycle_focus(false),
+            Action::PrevPane => self.cycle_focus(true),
+            Action::FocusLeft => self.focus_dir(-1, 0),
+            Action::FocusRight => self.focus_dir(1, 0),
+            Action::FocusUp => self.focus_dir(0, -1),
+            Action::FocusDown => self.focus_dir(0, 1),
+            Action::ResizeLeft => self.tree.nudge(self.focus, Dir::Horizontal, -0.05),
+            Action::ResizeRight => self.tree.nudge(self.focus, Dir::Horizontal, 0.05),
+            Action::ResizeUp => self.tree.nudge(self.focus, Dir::Vertical, -0.05),
+            Action::ResizeDown => self.tree.nudge(self.focus, Dir::Vertical, 0.05),
+            Action::Detach => self.detach = true,
+            Action::QuitSession => self.quit = true,
+            Action::OpenMenu => self.open_app_menu(),
+            Action::OpenKeybinds => self.overlay = Some(Overlay::Keybinds(Keybinds::new())),
+            Action::OpenSettings => {
+                self.overlay =
+                    Some(Overlay::Settings(SettingsDialog::new(self.settings_snapshot())));
+            }
+            Action::OpenThemes => {
+                self.overlay = Some(Overlay::Themes(ThemePicker::new(&self.config.theme)));
+            }
+            Action::GotoPane(n) => self.goto_pane(n),
+            // File browser and editor actions are resolved against the focused pane.
             _ => {}
         }
+    }
+
+    /// The dropdown of the dock's menu button, anchored at that button.
+    fn open_app_menu(&mut self) {
+        let (x, y) = self.dock.iter().find(|(_, hit)| *hit == DockHit::Menu).map_or(
+            (self.area.right().saturating_sub(1), self.area.bottom().saturating_sub(2)),
+            |(r, _)| (r.x, r.y),
+        );
+        self.menu = Some(Menu::app(x, y, self.focus));
+    }
+
+    pub fn settings_snapshot(&self) -> settings::Snapshot {
+        settings::gather(
+            &self.session,
+            &self.config.theme,
+            self.config.keymap.overrides().len(),
+            &self.config.warnings,
+        )
+    }
+
+    /// Preview or apply a theme without saving it.
+    pub fn set_theme(&mut self, name: &str) {
+        self.config.theme = name.to_string();
+        let (theme, _) = theme::resolve(name, &self.config.colors);
+        self.theme = theme;
+    }
+
+    /// Persist theme and bindings; returns a short message for the UI.
+    pub fn save_config(&mut self) -> String {
+        match self.config.save() {
+            Ok(()) => {
+                // Our own write must not look like an outside edit.
+                self.config_mtime = config::modified();
+                "saved".to_string()
+            }
+            Err(e) => format!("could not save config: {e:#}"),
+        }
+    }
+
+    /// Pick up edits made to the config file while the session is running.
+    pub fn poll_config(&mut self) {
+        if self.config_checked.elapsed() < CONFIG_POLL {
+            return;
+        }
+        self.config_checked = Instant::now();
+        let modified = config::modified();
+        if modified == self.config_mtime || self.overlay.is_some() {
+            return;
+        }
+        self.config_mtime = modified;
+        self.config = Config::load();
+        let (theme, warnings) = theme::resolve(&self.config.theme, &self.config.colors);
+        self.theme = theme;
+        self.config.warnings.extend(warnings);
+        self.notice = Some(match self.config.warnings.first() {
+            Some(w) => format!("config reloaded with warnings: {w}"),
+            None => "config reloaded".to_string(),
+        });
     }
 
     fn run_menu(&mut self, target: PaneId, action: MenuAction) {
@@ -489,7 +743,12 @@ impl App {
             MenuAction::NewGraph => self.open(Kind::Graph, Dir::Horizontal),
             MenuAction::NewFiles => self.open(Kind::Files, Dir::Horizontal),
             MenuAction::Zoom => self.toggle_zoom(),
-            MenuAction::Close => self.close(target),
+            MenuAction::Close => self.request_close(target),
+            MenuAction::Keybindings => self.run_action(Action::OpenKeybinds),
+            MenuAction::Settings => self.run_action(Action::OpenSettings),
+            MenuAction::Themes => self.run_action(Action::OpenThemes),
+            MenuAction::Detach => self.detach = true,
+            MenuAction::QuitSession => self.quit = true,
         }
     }
 
@@ -521,6 +780,16 @@ impl App {
     fn on_mouse(&mut self, m: MouseEvent) -> Result<()> {
         let (x, y) = (m.column, m.row);
 
+        // A dialog owns the screen: the wheel scrolls it, everything else is ignored.
+        if let Some(overlay) = &mut self.overlay {
+            match m.kind {
+                MouseEventKind::ScrollUp => overlay.scroll(-3),
+                MouseEventKind::ScrollDown => overlay.scroll(3),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         let free = self.drag.is_none() && self.menu.is_none() && self.selecting.is_none();
         if free && !m.modifiers.contains(KeyModifiers::SHIFT) {
             if let Some(id) = self.pane_at(x, y) {
@@ -541,7 +810,10 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.menu = None;
-                if let Some(id) = self.pane_at(x, y) {
+                if let Some(DockHit::Pane(id)) = self.dock_at(x, y) {
+                    self.focus = id;
+                    self.menu = Some(Menu::new(x, y, id));
+                } else if let Some(id) = self.pane_at(x, y) {
                     self.focus = id;
                     self.menu = Some(Menu::new(x, y, id));
                 }
@@ -551,6 +823,19 @@ impl App {
                 if let Some(menu) = self.menu.take() {
                     if let Some(i) = menu.item_at(x, y, self.area) {
                         self.run_menu(menu.target, menu.items[i].1);
+                    }
+                    return Ok(());
+                }
+                if let Some(hit) = self.dock_at(x, y) {
+                    match hit {
+                        DockHit::Pane(id) => {
+                            self.focus = id;
+                            if self.zoomed.is_some() {
+                                self.zoomed = Some(id);
+                            }
+                        }
+                        DockHit::New => self.open(Kind::Terminal, Dir::Horizontal),
+                        DockHit::Menu => self.open_app_menu(),
                     }
                     return Ok(());
                 }
@@ -612,8 +897,13 @@ impl App {
             }
             Some(Pane::Graph(v)) => v.scroll(-dir),
             Some(Pane::Files(v)) => v.scroll(-dir),
+            Some(Pane::Editor(v)) => v.scroll_view(-dir * 3),
             None => {}
         }
+    }
+
+    fn dock_at(&self, x: u16, y: u16) -> Option<DockHit> {
+        self.dock.iter().find(|(r, _)| contains(*r, x, y)).map(|(_, hit)| *hit)
     }
 
     fn click_pane(&mut self, id: PaneId, x: u16, y: u16) -> Result<()> {
@@ -636,7 +926,14 @@ impl App {
             Some(Pane::Files(v)) => {
                 if let Some(row) = y.checked_sub(area.y) {
                     let idx = v.state.offset() + row as usize;
-                    v.click(idx)?;
+                    let act = v.click(idx)?;
+                    self.files_act(act);
+                }
+            }
+            Some(Pane::Editor(v)) => {
+                let text_x = area.x + v.gutter() as u16;
+                if contains(area, x, y) && x >= text_x {
+                    v.click((y - area.y) as usize, (x - text_x) as usize);
                 }
             }
             None => {}

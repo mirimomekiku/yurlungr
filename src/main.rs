@@ -12,6 +12,7 @@ mod layout;
 mod menu;
 mod mouse;
 mod onboarding;
+mod overlay;
 mod proto;
 mod server;
 mod settings;

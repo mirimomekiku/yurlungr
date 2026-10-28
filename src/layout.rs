@@ -88,19 +88,24 @@ impl Node {
         }
     }
 
-    pub fn split(&mut self, target: PaneId, new: PaneId, dir: Dir) -> bool {
+    /// Split the leaf `target`, placing `new` after it (right or below), or
+    /// before it (left or above) when `before` is set.
+    pub fn split(&mut self, target: PaneId, new: PaneId, dir: Dir, before: bool) -> bool {
         if matches!(self, Node::Leaf(id) if *id == target) {
+            let (first, second) = if before { (new, target) } else { (target, new) };
             *self = Node::Split {
                 dir,
                 ratio: 0.5,
-                a: Box::new(Node::Leaf(target)),
-                b: Box::new(Node::Leaf(new)),
+                a: Box::new(Node::Leaf(first)),
+                b: Box::new(Node::Leaf(second)),
             };
             return true;
         }
         match self {
             Node::Leaf(_) => false,
-            Node::Split { a, b, .. } => a.split(target, new, dir) || b.split(target, new, dir),
+            Node::Split { a, b, .. } => {
+                a.split(target, new, dir, before) || b.split(target, new, dir, before)
+            }
         }
     }
 
@@ -167,5 +172,38 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn order(n: &Node) -> Vec<PaneId> {
+        let mut ids = Vec::new();
+        n.ids(&mut ids);
+        ids
+    }
+
+    #[test]
+    fn split_places_the_new_pane_after_or_before() {
+        let mut t = Node::Leaf(0);
+        assert!(t.split(0, 1, Dir::Horizontal, false));
+        assert_eq!(order(&t), [0, 1]);
+        assert!(t.split(0, 2, Dir::Horizontal, true));
+        assert_eq!(order(&t), [2, 0, 1]);
+        assert!(t.split(1, 3, Dir::Vertical, false));
+        assert_eq!(order(&t), [2, 0, 1, 3]);
+        assert!(!t.split(99, 4, Dir::Vertical, false), "unknown target");
+        assert_eq!(order(&t).len(), 4);
+    }
+
+    #[test]
+    fn remove_promotes_the_sibling() {
+        let mut t = Node::Leaf(0);
+        t.split(0, 1, Dir::Horizontal, false);
+        t.split(1, 2, Dir::Vertical, false);
+        t.remove(1);
+        assert_eq!(order(&t), [0, 2]);
     }
 }

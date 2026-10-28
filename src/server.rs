@@ -175,6 +175,7 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
             return Ok(());
         }
         app.persist();
+        app.poll_config();
 
         if app.detach {
             app.detach = false;

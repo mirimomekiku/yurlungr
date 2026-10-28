@@ -4,12 +4,19 @@ use crate::layout::PaneId;
 
 #[derive(Clone, Copy)]
 pub enum MenuAction {
+    // Pane context menu (right click).
     SplitRight,
     SplitDown,
     NewGraph,
     NewFiles,
     Zoom,
     Close,
+    // App dropdown (the dock's menu button).
+    Keybindings,
+    Settings,
+    Themes,
+    Detach,
+    QuitSession,
 }
 
 pub struct Menu {
@@ -21,6 +28,7 @@ pub struct Menu {
 }
 
 impl Menu {
+    /// The right-click menu for one pane.
     pub fn new(x: u16, y: u16, target: PaneId) -> Self {
         Self {
             x,
@@ -34,6 +42,23 @@ impl Menu {
                 ("File browser", MenuAction::NewFiles),
                 ("Zoom / unzoom", MenuAction::Zoom),
                 ("Close pane", MenuAction::Close),
+            ],
+        }
+    }
+
+    /// The dropdown opened from the dock's menu button.
+    pub fn app(x: u16, y: u16, target: PaneId) -> Self {
+        Self {
+            x,
+            y,
+            target,
+            selected: 0,
+            items: vec![
+                ("Keybindings...", MenuAction::Keybindings),
+                ("Settings...", MenuAction::Settings),
+                ("Theme...", MenuAction::Themes),
+                ("Detach", MenuAction::Detach),
+                ("Quit session", MenuAction::QuitSession),
             ],
         }
     }
