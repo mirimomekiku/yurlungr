@@ -31,9 +31,18 @@ pub enum ReportState {
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientMsg {
-    Hello { token: String, cols: u16, rows: u16 },
+    Hello {
+        token: String,
+        cols: u16,
+        rows: u16,
+    },
     /// One-shot message from an agent hook; never replaces the attached client.
-    Report { token: String, pane: usize, agent: String, state: ReportState },
+    Report {
+        token: String,
+        pane: usize,
+        agent: String,
+        state: ReportState,
+    },
     Event(Event),
     /// Stop the whole session (all shells).
     Kill,
@@ -41,7 +50,12 @@ pub enum ClientMsg {
 
 #[derive(Serialize, Deserialize)]
 pub enum ServerMsg {
-    Update { width: u16, height: u16, full: bool, cells: Vec<(u16, u16, Cell)> },
+    Update {
+        width: u16,
+        height: u16,
+        full: bool,
+        cells: Vec<(u16, u16, Cell)>,
+    },
     /// Base64 payload for an OSC 52 clipboard write.
     Clipboard(String),
     /// The client was detached (prefix+d) or replaced by another client.

@@ -35,20 +35,14 @@ fn split_area(dir: Dir, ratio: f32, area: Rect) -> (Rect, Rect) {
             let w = ((area.width as f32 * ratio).round() as u16)
                 .max(lo)
                 .min(area.width.saturating_sub(lo));
-            (
-                Rect { width: w, ..area },
-                Rect { x: area.x + w, width: area.width - w, ..area },
-            )
+            (Rect { width: w, ..area }, Rect { x: area.x + w, width: area.width - w, ..area })
         }
         Dir::Vertical => {
             let lo = MIN_SIZE.min(area.height);
             let h = ((area.height as f32 * ratio).round() as u16)
                 .max(lo)
                 .min(area.height.saturating_sub(lo));
-            (
-                Rect { height: h, ..area },
-                Rect { y: area.y + h, height: area.height - h, ..area },
-            )
+            (Rect { height: h, ..area }, Rect { y: area.y + h, height: area.height - h, ..area })
         }
     }
 }
@@ -66,18 +60,12 @@ impl Node {
             Node::Split { dir, ratio, a, b } => {
                 let (ra, rb) = split_area(*dir, *ratio, area);
                 let hit = match dir {
-                    Dir::Horizontal => Rect {
-                        x: rb.x.saturating_sub(1),
-                        y: area.y,
-                        width: 2,
-                        height: area.height,
-                    },
-                    Dir::Vertical => Rect {
-                        x: area.x,
-                        y: rb.y.saturating_sub(1),
-                        width: area.width,
-                        height: 2,
-                    },
+                    Dir::Horizontal => {
+                        Rect { x: rb.x.saturating_sub(1), y: area.y, width: 2, height: area.height }
+                    }
+                    Dir::Vertical => {
+                        Rect { x: area.x, y: rb.y.saturating_sub(1), width: area.width, height: 2 }
+                    }
                 };
                 dividers.push(Divider { path: path.clone(), dir: *dir, area, rect: hit });
                 path.push(false);

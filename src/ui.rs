@@ -135,18 +135,17 @@ fn render_graph(f: &mut Frame, v: &mut GraphView, block: Block, rect: Rect) {
 }
 
 fn render_files(f: &mut Frame, v: &mut FilesView, block: Block, rect: Rect) {
-    let items: Vec<ListItem> = v
-        .fb
-        .entries
-        .iter()
-        .map(|e| {
-            if e.is_dir {
-                ListItem::new(format!("{}/", e.name)).style(Style::new().fg(Color::Blue).bold())
-            } else {
-                ListItem::new(e.name.clone())
-            }
-        })
-        .collect();
+    let items: Vec<ListItem> =
+        v.fb.entries
+            .iter()
+            .map(|e| {
+                if e.is_dir {
+                    ListItem::new(format!("{}/", e.name)).style(Style::new().fg(Color::Blue).bold())
+                } else {
+                    ListItem::new(e.name.clone())
+                }
+            })
+            .collect();
     f.render_stateful_widget(
         List::new(items)
             .block(block)

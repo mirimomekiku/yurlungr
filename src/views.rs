@@ -102,10 +102,7 @@ pub struct FilesView {
 
 impl FilesView {
     pub fn new(root: PathBuf) -> Result<Self> {
-        Ok(Self {
-            fb: FileBrowser::new(root)?,
-            state: ListState::default().with_selected(Some(0)),
-        })
+        Ok(Self { fb: FileBrowser::new(root)?, state: ListState::default().with_selected(Some(0)) })
     }
 
     pub fn scroll(&mut self, delta: isize) {

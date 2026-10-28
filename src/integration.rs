@@ -110,10 +110,9 @@ fn entry_is_ours(entry: &Value, style: Style) -> bool {
     let direct = |v: &Value| v.get("command").and_then(Value::as_str).is_some_and(is_ours);
     match style {
         Style::Flat => direct(entry),
-        Style::Nested => entry
-            .get("hooks")
-            .and_then(Value::as_array)
-            .is_some_and(|hs| hs.iter().any(direct)),
+        Style::Nested => {
+            entry.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.iter().any(direct))
+        }
     }
 }
 
@@ -211,7 +210,8 @@ pub fn run(action: Action, agent: Option<Agent>) -> Result<()> {
             let mut root = load(&path)?;
             match action {
                 Action::Status => {
-                    let state = if installed(&root, agent.style()) { "installed" } else { "not installed" };
+                    let state =
+                        if installed(&root, agent.style()) { "installed" } else { "not installed" };
                     Ok(format!("{state} ({})", path.display()))
                 }
                 Action::Install | Action::Uninstall => {

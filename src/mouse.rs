@@ -71,7 +71,9 @@ pub fn encode(
             for v in vals {
                 if matches!(enc, MouseProtocolEncoding::Utf8) {
                     let mut buf = [0u8; 4];
-                    out.extend_from_slice(char::from_u32(v as u32)?.encode_utf8(&mut buf).as_bytes());
+                    out.extend_from_slice(
+                        char::from_u32(v as u32)?.encode_utf8(&mut buf).as_bytes(),
+                    );
                 } else {
                     out.push(u8::try_from(v).ok()?);
                 }

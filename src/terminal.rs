@@ -60,8 +60,10 @@ fn looks_blocked(screen: &vt100::Screen) -> bool {
         .rows(0, cols)
         .skip(rows.saturating_sub(15) as usize)
         .collect::<Vec<_>>()
-        .join("
-")
+        .join(
+            "
+",
+        )
         .to_lowercase();
     PROMPTS.iter().any(|p| tail.contains(p))
 }
@@ -120,12 +122,8 @@ fn shell() -> String {
 impl Terminal {
     pub fn spawn(cwd: &Path, rows: u16, cols: u16, env: &[(String, String)]) -> Result<Self> {
         let (rows, cols) = (rows.max(1), cols.max(1));
-        let pair = native_pty_system().openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pair =
+            native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
         let mut cmd = CommandBuilder::new(shell());
         cmd.cwd(cwd);

@@ -167,9 +167,9 @@ impl App {
         }
         for (id, kind) in saved.kinds {
             let pane = match kind {
-                Kind::Terminal => {
-                    Terminal::spawn(&saved.root, 24, 80, &pane_env(session, id)).ok().map(Pane::Terminal)
-                }
+                Kind::Terminal => Terminal::spawn(&saved.root, 24, 80, &pane_env(session, id))
+                    .ok()
+                    .map(Pane::Terminal),
                 Kind::Graph => Some(Pane::Graph(GraphView::new(&saved.root))),
                 Kind::Files => FilesView::new(saved.root.clone()).ok().map(Pane::Files),
             };
@@ -262,13 +262,15 @@ impl App {
     fn open(&mut self, kind: Kind, dir: Dir) {
         let id = self.next_id;
         let pane = match kind {
-            Kind::Terminal => match Terminal::spawn(&self.root, 24, 80, &pane_env(&self.session, id)) {
-                Ok(t) => Pane::Terminal(t),
-                Err(e) => {
-                    self.notice = Some(format!("failed to start shell: {e}"));
-                    return;
+            Kind::Terminal => {
+                match Terminal::spawn(&self.root, 24, 80, &pane_env(&self.session, id)) {
+                    Ok(t) => Pane::Terminal(t),
+                    Err(e) => {
+                        self.notice = Some(format!("failed to start shell: {e}"));
+                        return;
+                    }
                 }
-            },
+            }
             Kind::Graph => Pane::Graph(GraphView::new(&self.root)),
             Kind::Files => match FilesView::new(self.root.clone()) {
                 Ok(v) => Pane::Files(v),
@@ -505,14 +507,9 @@ impl App {
         if mode == vt100::MouseProtocolMode::None {
             return false;
         }
-        if let Some(bytes) = mouse::encode(
-            m.kind,
-            m.modifiers,
-            m.column - area.x,
-            m.row - area.y,
-            mode,
-            enc,
-        ) {
+        if let Some(bytes) =
+            mouse::encode(m.kind, m.modifiers, m.column - area.x, m.row - area.y, mode, enc)
+        {
             t.write(&bytes);
         }
         if matches!(m.kind, MouseEventKind::Down(_)) {
