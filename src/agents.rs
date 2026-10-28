@@ -165,6 +165,8 @@ mod tests {
         assert_eq!(detect(&[]), None);
     }
 
+    // Reads /proc or runs `ps`, neither of which exists on Windows.
+    #[cfg(unix)]
     #[test]
     fn reads_our_own_command_line() {
         let me =
