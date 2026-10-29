@@ -17,7 +17,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -118,6 +118,51 @@ impl Tokens {
         self.output += o.output;
         self.cache_read += o.cache_read;
         self.cache_write += o.cache_write;
+    }
+}
+
+/// Longest log line that is read; longer ones are skipped instead of buffered.
+const MAX_LINE: u64 = 16 * 1024 * 1024;
+
+/// The lines of a log file. Unlike `BufRead::lines` it survives invalid UTF-8
+/// (the bytes are replaced, the file is not abandoned) and never holds an
+/// enormous line in memory.
+struct Lines<R> {
+    reader: BufReader<R>,
+    buf: Vec<u8>,
+}
+
+impl<R: Read> Lines<R> {
+    fn new(source: R) -> Self {
+        Self { reader: BufReader::new(source), buf: Vec::new() }
+    }
+}
+
+impl<R: Read> Iterator for Lines<R> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        loop {
+            self.buf.clear();
+            let n = self.reader.by_ref().take(MAX_LINE).read_until(b'\n', &mut self.buf).ok()?;
+            if n == 0 {
+                return None;
+            }
+            if self.buf.last() == Some(&b'\n') || (n as u64) < MAX_LINE {
+                return Some(String::from_utf8_lossy(&self.buf).into_owned());
+            }
+            // Overlong: drop the rest of this line, then carry on with the next.
+            loop {
+                self.buf.clear();
+                let n = self.reader.by_ref().take(1 << 20).read_until(b'\n', &mut self.buf).ok()?;
+                if n == 0 {
+                    return None;
+                }
+                if self.buf.last() == Some(&b'\n') {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -336,12 +381,15 @@ fn scan_claude(projects: &Path, now: i64) -> ClaudeInfo {
         let Ok(handle) = fs::File::open(file) else { continue };
         let session =
             file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        for line in BufReader::new(handle).lines().map_while(Result::ok) {
+        for line in Lines::new(handle) {
             // Cheap filter: most lines are not assistant messages and some are huge.
-            if !line.contains("\"type\":\"assistant\"") {
+            if !line.contains("\"assistant\"") {
                 continue;
             }
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            if v.get("type").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
             let Some(at) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso) else {
                 continue;
             };
@@ -559,7 +607,7 @@ fn scan_codex(sessions_dir: &Path, now: i64) -> CodexInfo {
         // Each token_count event carries the session's running total, so the
         // last one is the session's total.
         let mut last_total = Tokens::default();
-        for line in BufReader::new(handle).lines().map_while(Result::ok) {
+        for line in Lines::new(handle) {
             if !line.contains("\"token_count\"") {
                 continue;
             }
@@ -660,6 +708,16 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_792_000_000; // 2026-10-17-ish
+
+    #[test]
+    fn lines_survive_invalid_utf8_and_missing_final_newline() {
+        let data: &[u8] = b"one\n\xff\xfe bad\ntwo\r\nthree";
+        let lines: Vec<String> = Lines::new(data).collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "one\n");
+        assert!(lines[1].contains("bad"));
+        assert_eq!(lines[3], "three");
+    }
 
     fn iso(secs_ago: i64) -> String {
         let t = NOW - secs_ago;
