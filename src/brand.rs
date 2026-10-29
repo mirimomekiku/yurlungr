@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn the_art_is_a_snake_of_a_sensible_size() {
         let rows = SNAKE.lines().count();
-        assert!((5..=10).contains(&rows), "{rows} rows");
+        assert!((5..=16).contains(&rows), "{rows} rows");
         assert!(width() <= 60, "fits an 80-column terminal with room to spare");
         assert!(
             SNAKE.chars().all(|c| "█▀▄▓░ \n".contains(c)),

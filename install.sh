@@ -186,21 +186,27 @@ rainbow() {
 # assets/snake.txt, made by scripts/make-snake.py.
 snake_art() {
     cat <<'SNAKE'
-                                       vv#v
-            vv######v               vv###^^#v      v
-          v####^^^####v           v###########vvvv^%%%
-        v###^%%%%%%%^###v       v###^%%%%^^^###v%%^v%::
-^vv  vv###^%%%%:::::::^####vvv####^%%%%::::%%%%^%%::%%:
-  ^^##^^%%%%%::::       ^^######^%%%%::::    ::::%::  :
-    %%%%%%:::::           %%%%%%%%%::::            :
-      ::::::                :::::::::
+       vvvvvvvvvvvvvvvvvvvvvvvv  vv######v
+    v#################################%%###v      v
+   ############################^#############vvvv^%%%
+  #####%%%%%%%%%%%%%%%%%%%%%%%%%%^^#####^^^^%%%%%^v%::
+  #####%%::::::::::::::::::::::::: %%%%%%%%%%%:::::%%
+   ################################vv :::::          :
+    ^#################################v
+      %^^^^^^^^^^^^^^^^^^^^^^^^^^^^####v%
+        :%%%%%%%%%%%%%%%%%%%%%%%%%%#####%%
+                   vvvvvvvvvvvvvvvv####^%%:
+vvvvvvv###############################^%%%:
+ %%%%%%^^^^^^^^^^^^################^^%%%%:
+   ::::::%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%::
+                      ::::::::::::::::
 SNAKE
 }
 
 # One picture of the banner, its colours turned by phase (see rainbow).
 paint_banner() {
     printf '\n'
-    snake_art | rainbow 55 "$1"
+    snake_art | rainbow 54 "$1"
     printf '\n  %s' "$BOLD"
     printf 'y u r l u n g r' | rainbow 15 "$1" | tr -d '\n'
     printf '\n  %sa terminal workspace for coding agents%s\n\n' "$DIM" "$RESET"

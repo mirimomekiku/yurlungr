@@ -115,14 +115,20 @@ function Install-Yurlungr {
     # The snake, ASCII-coded (# full block, ^ upper half, v lower half; % side, : shadow).
     # It is the same picture as assets/snake.txt, made by scripts/make-snake.py.
     $art = @(
-        '                                       vv#v',
-        '            vv######v               vv###^^#v      v',
-        '          v####^^^####v           v###########vvvv^%%%',
-        '        v###^%%%%%%%^###v       v###^%%%%^^^###v%%^v%::',
-        '^vv  vv###^%%%%:::::::^####vvv####^%%%%::::%%%%^%%::%%:',
-        '  ^^##^^%%%%%::::       ^^######^%%%%::::    ::::%::  :',
-        '    %%%%%%:::::           %%%%%%%%%::::            :',
-        '      ::::::                :::::::::'
+        '       vvvvvvvvvvvvvvvvvvvvvvvv  vv######v',
+        '    v#################################%%###v      v',
+        '   ############################^#############vvvv^%%%',
+        '  #####%%%%%%%%%%%%%%%%%%%%%%%%%%^^#####^^^^%%%%%^v%::',
+        '  #####%%::::::::::::::::::::::::: %%%%%%%%%%%:::::%%',
+        '   ################################vv :::::          :',
+        '    ^#################################v',
+        '      %^^^^^^^^^^^^^^^^^^^^^^^^^^^^####v%',
+        '        :%%%%%%%%%%%%%%%%%%%%%%%%%%#####%%',
+        '                   vvvvvvvvvvvvvvvv####^%%:',
+        'vvvvvvv###############################^%%%:',
+        ' %%%%%%^^^^^^^^^^^^################^^%%%%:',
+        '   ::::::%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%::',
+        '                      ::::::::::::::::'
     )
 
     # One picture of the banner, in the current $phase.
@@ -130,7 +136,7 @@ function Install-Yurlungr {
         Write-Host ''
         foreach ($line in $art) {
             $line = $line.Replace('#', [string][char]0x2588).Replace('^', [string][char]0x2580).Replace('v', [string][char]0x2584).Replace('%', [string][char]0x2593).Replace(':', [string][char]0x2591)
-            Write-Rainbow $line 55
+            Write-Rainbow $line 54
         }
         Write-Host ''
         Write-Host '  ' -NoNewline

@@ -18,7 +18,7 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEPTH = 2    # pixels of side
-SHADOW = 2   # further pixels of shadow
+SHADOW = 1   # further pixels of shadow
 
 face_rows = (ROOT / "assets/snake-face.txt").read_text(encoding="utf-8").rstrip("\n").split("\n")
 rows = len(face_rows)
