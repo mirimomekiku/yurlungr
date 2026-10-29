@@ -37,6 +37,7 @@ enum Incoming {
     Msg(u64, ClientMsg),
     Gone(u64),
     Report { pane: usize, agent: String, state: ReportState },
+    Stop,
 }
 
 struct Client {
@@ -95,6 +96,12 @@ fn serve_conn(id: u64, stream: TcpStream, token: String, tx: Sender<Incoming>) {
     let (cols, rows, force) = match serde_json::from_str::<ClientMsg>(&line) {
         Ok(ClientMsg::Hello { token: given, cols, rows, force }) if given == token => {
             (cols, rows, force)
+        }
+        Ok(ClientMsg::Stop { token: given }) => {
+            if given == token {
+                let _ = tx.send(Incoming::Stop);
+            }
+            return;
         }
         Ok(ClientMsg::Report { token: given, pane, agent, state }) => {
             if given == token {
@@ -161,7 +168,7 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
                     tui.backend_mut().resize(cols.clamp(1, MAX_DIM), rows.clamp(1, MAX_DIM));
                     client = Some(Client { id, stream, prev: Buffer::empty(Rect::default()) });
                 }
-                Incoming::Msg(_, ClientMsg::Kill) => killed = true,
+                Incoming::Stop => killed = true,
                 Incoming::Msg(id, ClientMsg::Event(ev))
                     if client.as_ref().is_some_and(|c| c.id == id) =>
                 {
@@ -194,6 +201,7 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
         }
         app.persist();
         app.poll_config();
+        app.poll_files();
         app.track_agents();
         app.poll_overlay();
 
@@ -201,7 +209,6 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
             app.detach = false;
             if let Some(mut c) = client.take() {
                 let _ = proto::send(&mut c.stream, &ServerMsg::Detached);
-        app.poll_files();
             }
         }
         if let Some(c) = &mut client {

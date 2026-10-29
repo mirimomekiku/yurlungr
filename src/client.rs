@@ -69,10 +69,19 @@ pub fn kill(session: &str) -> Result<()> {
     let Some((mut stream, token)) = proto::connect(session) else {
         bail!("no running session named '{session}'");
     };
-    proto::send(&mut stream, &ClientMsg::Hello { token, cols: 80, rows: 24, force: true })?;
-    proto::send(&mut stream, &ClientMsg::Kill)?;
-    println!("session '{session}' stopped");
-    Ok(())
+    proto::send(&mut stream, &ClientMsg::Stop { token })?;
+    // The server removes its connection file as it exits. A server from an
+    // older version does not understand `Stop`, so confirm instead of assuming.
+    for _ in 0..30 {
+        if proto::connect(session).is_none() {
+            println!("session '{session}' stopped");
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "session '{session}' did not stop (is it an older version? end its server process by hand)"
+    )
 }
 
 /// Fail early, and clearly, when there is no terminal to draw on.

@@ -47,8 +47,11 @@ pub enum ClientMsg {
         state: ReportState,
     },
     Event(Event),
-    /// Stop the whole session (all shells).
-    Kill,
+    /// One-shot: stop the whole session (all shells). Like `Report`, it never
+    /// replaces the attached client, which is told the session ended.
+    Stop {
+        token: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
