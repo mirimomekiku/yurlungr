@@ -1181,6 +1181,18 @@ impl App {
         });
     }
 
+    /// The folder a pane is about: the browser's directory, the open file's
+    /// folder, otherwise the workspace root.
+    fn pane_folder(&self, id: PaneId) -> PathBuf {
+        match self.panes.get(&id) {
+            Some(Pane::Files(v)) => v.fb.dir.clone(),
+            Some(Pane::Editor(v)) => {
+                v.path.parent().map_or_else(|| self.ws_root(), std::path::Path::to_path_buf)
+            }
+            _ => self.ws_root(),
+        }
+    }
+
     fn run_menu(&mut self, target: PaneId, action: MenuAction) {
         // The workspace menu's target is a workspace index, not a pane.
         match action {
@@ -1201,6 +1213,13 @@ impl App {
             MenuAction::NewGraph => self.open(Kind::Graph, Dir::Horizontal),
             MenuAction::NewFiles => self.open(Kind::Files, Dir::Horizontal),
             MenuAction::Zoom => self.toggle_zoom(),
+            MenuAction::OpenExplorer => {
+                let dir = self.pane_folder(target);
+                self.notice = Some(match crate::file_browser::open_in_file_manager(&dir) {
+                    Ok(()) => format!("opened {}", dir.display()),
+                    Err(e) => format!("cannot open {}: {e}", dir.display()),
+                });
+            }
             MenuAction::Close => self.request_close(target),
             MenuAction::Keybindings => self.run_action(Action::OpenKeybinds),
             MenuAction::Settings => self.run_action(Action::OpenSettings),

@@ -10,6 +10,7 @@ pub enum MenuAction {
     NewGraph,
     NewFiles,
     Zoom,
+    OpenExplorer,
     Close,
     // Workspace context menu (right click on a space in the sidebar).
     NewWorkspace,
@@ -22,6 +23,14 @@ pub enum MenuAction {
     Detach,
     QuitSession,
 }
+
+const EXPLORER_LABEL: &str = if cfg!(windows) {
+    "Open in Explorer"
+} else if cfg!(target_os = "macos") {
+    "Open in Finder"
+} else {
+    "Open in file manager"
+};
 
 pub struct Menu {
     pub x: u16,
@@ -46,6 +55,7 @@ impl Menu {
                 ("Git graph", MenuAction::NewGraph),
                 ("File browser", MenuAction::NewFiles),
                 ("Zoom / unzoom", MenuAction::Zoom),
+                (EXPLORER_LABEL, MenuAction::OpenExplorer),
                 ("Close pane", MenuAction::Close),
             ],
         }

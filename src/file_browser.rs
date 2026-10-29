@@ -87,12 +87,40 @@ impl FileBrowser {
 // None of these ever overwrite: a destination that already exists is an error,
 // except `copy_into`, which picks a free name.
 
+/// Show a folder in the system's file manager (Explorer, Finder, xdg-open).
+/// The file manager is started detached; its own exit status is ignored
+/// because Explorer reports failure even when it opened the folder.
+pub fn open_in_file_manager(dir: &Path) -> io::Result<()> {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+}
+
 /// Replace a file's contents through a temp file in the same folder, so a crash
 /// never leaves it half written. A symlink is followed (the link stays a link)
 /// and the existing permissions are kept. Hard-linked files, and files in a
 /// folder we cannot create files in, are written in place instead.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // A hard-linked file would be detached from its other names by a rename.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(&target).is_ok_and(|m| m.nlink() > 1) {
+            return fs::write(&target, bytes);
+        }
+    }
     let mut tmp = target.as_os_str().to_owned();
     tmp.push(".yurlungr.tmp");
     let tmp = PathBuf::from(tmp);
@@ -120,14 +148,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// A single path component: no separators, not empty, not `.` or `..`.
-    // A hard-linked file would be detached from its other names by a rename.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if fs::metadata(&target).is_ok_and(|m| m.nlink() > 1) {
-            return fs::write(&target, bytes);
-        }
-    }
 pub fn valid_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." {
         bail!("invalid name");
@@ -396,6 +416,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn write_atomic_writes_in_place_for_hard_links() {
+        let d = tmp();
+        let a = d.path().join("a");
+        let b = d.path().join("b");
+        fs::write(&a, "old").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        write_atomic(&a, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&b).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn copy_through_a_symlink_into_itself_is_refused() {
         let d = tmp();
         let sub = create_dir(d.path(), "proj").unwrap();
@@ -414,18 +446,6 @@ mod tests {
         let mut fb = FileBrowser::new(d.path().to_path_buf()).unwrap();
         let names: Vec<_> = fb.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["zdir", ".hidden", "b.txt"]);
-    #[cfg(unix)]
-    #[test]
-    fn write_atomic_writes_in_place_for_hard_links() {
-        let d = tmp();
-        let a = d.path().join("a");
-        let b = d.path().join("b");
-        fs::write(&a, "old").unwrap();
-        fs::hard_link(&a, &b).unwrap();
-        write_atomic(&a, b"new").unwrap();
-        assert_eq!(fs::read_to_string(&b).unwrap(), "new");
-    }
-
         fb.show_hidden = false;
         fb.reload().unwrap();
         assert_eq!(fb.entries.len(), 2);
