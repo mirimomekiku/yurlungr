@@ -48,7 +48,7 @@ function Install-Yurlungr {
     # position 0..1 -> r, g, b (the same rainbow as the Linux installer and the app);
     # $k dims it (1 = the lit face of the snake, 0.6 its side, 0.3 its shadow)
     function Get-RainbowRgb([double]$position, [double]$k = 1.0) {
-        $turn = [Math]::Min(1.0, [Math]::Max(0.0, $position)) * 0.83 + $phase
+        $turn = [Math]::Min(1.0, [Math]::Max(0.0, $position)) * 0.83 - $phase
         $hue = ($turn - [Math]::Floor($turn)) * 6
         $sector = [int][Math]::Floor($hue)
         $f = $hue - [Math]::Floor($hue)
@@ -81,8 +81,13 @@ function Install-Yurlungr {
     }
 
     # Write text with the rainbow running across `$width` columns.
-    function Write-Rainbow([string]$text, [int]$width, [switch]$NoNewline) {
+    function Write-Rainbow([string]$text, [int]$width, [string]$trailRow = '', [switch]$NoNewline) {
         $last = [Math]::Max(1, $width - 1)
+        # along the snake's body when a trail row is given, else across the text
+        function Get-TrailPosition([int]$i) {
+            if ($trailRow) { return $trailDigits.IndexOf($trailRow[$i]) / 61.0 }
+            return $i / $last
+        }
         if ($plain) {
             if ($NoNewline) { Write-Host $text -NoNewline } else { Write-Host $text }
             return
@@ -94,7 +99,7 @@ function Install-Yurlungr {
                 if ($ch -ne ' ') {
                     $k = 1.0
                     if ($ch -eq [char]0x2593) { $k = 0.6 } elseif ($ch -eq [char]0x2591) { $k = 0.3 }
-                    $rgb = Get-RainbowRgb ($i / $last) $k
+                    $rgb = Get-RainbowRgb (Get-TrailPosition $i) $k
                     if ($trueColor) { [void]$sb.Append("$esc[38;2;$($rgb[0]);$($rgb[1]);$($rgb[2])m") }
                     else { [void]$sb.Append("$esc[38;5;$(Get-Ansi256 $rgb)m") }
                 }
@@ -107,7 +112,7 @@ function Install-Yurlungr {
         for ($i = 0; $i -lt $text.Length; $i++) {
             $ch = [string]$text[$i]
             if ($ch -eq ' ') { Write-Host ' ' -NoNewline }
-            else { Write-Host $ch -NoNewline -ForegroundColor (Get-ConsoleColour ($i / $last)) }
+            else { Write-Host $ch -NoNewline -ForegroundColor (Get-ConsoleColour (Get-TrailPosition $i)) }
         }
         if (-not $NoNewline) { Write-Host '' }
     }
@@ -130,13 +135,32 @@ function Install-Yurlungr {
         '   ::::::%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%::',
         '                      ::::::::::::::::'
     )
+    # Where each cell lies along the snake's body (0 = tail tip .. z/Z = head), one
+    # base-62 digit per cell. The rainbow is laid along this trail.
+    $trail = @(
+        '       EEEEEFFGGHHIIJJKLLMMNNOO  QQRSSTTUU',
+        '    DDDDDDEEFFGGHHIIJJKLLMMNNOOPPQQRSSSSUUVV      Z',
+        '   CCCCCDDEEFFGGHHIIJJKLLMMNNOOPPQQRSSTTUUVVWWXXYYYZZ',
+        '  CBBBBCCCDDEEFFGHHIIJJKKLLMMNNOOQQRSSTTUUVVVWWXXYZYYZ',
+        '  CBBAABBCCDDEEFFGGHHIIJJKLLMMNNOO QRRSSTTUUVVVWWXXZZ',
+        '   BBAAzzyyxxwwvuuttssrrqqppoonnnnnmm RSSTT          Z',
+        '    BAAzzyyxxwwvuuttssrrqqppoonmmmmmmml',
+        '      Azzyyxxwwvuuttssrrqqppoonmmllllllll',
+        '        Azzyyxxwwvuuttssrrqqppoonmmkkkklll',
+        '                   abbccddeefgghhiijjkkllll',
+        '011223344556677899aabbccddeefgghhiijjkkkkll',
+        ' 00112244556677899aabbccddeefgghhiijjjkkkk',
+        '   01122344556677899aabccddeeffgghhiijjjk',
+        '                      abbccddeefgghhii'
+    )
+    $trailDigits = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
     # One picture of the banner, in the current $phase.
     function Write-Banner {
         Write-Host ''
-        foreach ($line in $art) {
-            $line = $line.Replace('#', [string][char]0x2588).Replace('^', [string][char]0x2580).Replace('v', [string][char]0x2584).Replace('%', [string][char]0x2593).Replace(':', [string][char]0x2591)
-            Write-Rainbow $line 54
+        for ($row = 0; $row -lt $art.Count; $row++) {
+            $line = $art[$row].Replace('#', [string][char]0x2588).Replace('^', [string][char]0x2580).Replace('v', [string][char]0x2584).Replace('%', [string][char]0x2593).Replace(':', [string][char]0x2591)
+            Write-Rainbow $line 54 $trail[$row]
         }
         Write-Host ''
         Write-Host '  ' -NoNewline

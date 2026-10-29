@@ -146,11 +146,12 @@ die() {
 # In the snake art `#`, `^` and `v` become the lit face, `%` the darker side
 # (60%) and `:` the faint shadow (30%).
 rainbow() {
-    awk -v mode="$COLOR" -v unicode="$UNICODE" -v width="$1" -v phase="${2:-0}" '
+    awk -v mode="$COLOR" -v unicode="$UNICODE" -v width="$1" -v phase="${2:-0}" -v pairs="${3:-}" '
     function lvl(c) { return int(c / 255 * 5 + 0.5) }
+    function pos(c) { return (index("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", c) - 1) / 61 }
     function paint(p, k,    h, s, f, r, g, b, t, q, v, x) {
         if (mode == "none") return ""
-        x = p * 0.83 + phase; x = x - int(x)
+        x = p * 0.83 - phase; x = x - int(x); if (x < 0) x = x + 1
         h = x * 6; s = int(h); f = h - s
         v = 1; t = 1 - 0.9 * (1 - f); q = 1 - 0.9 * f; u = 0.1
         if (s == 0) { r = v; g = t; b = u }
@@ -165,9 +166,12 @@ rainbow() {
         return sprintf("\033[38;5;%dm", 16 + 36 * lvl(r) + 6 * lvl(g) + lvl(b))
     }
     {
+        # trail mode: picture rows and trail rows alternate, and the colour
+        # follows the position along the body of the snake instead of the column
+        if (pairs == "trail") { if (NR % 2 == 1) { art = $0; next } trl = $0 } else { art = $0 }
         out = ""
-        for (i = 1; i <= length($0); i++) {
-            c = substr($0, i, 1)
+        for (i = 1; i <= length(art); i++) {
+            c = substr(art, i, 1)
             if (c == " ") { out = out " "; continue }
             k = 1
             if (c == "#") c = (unicode == 1) ? "█" : "#"
@@ -175,7 +179,8 @@ rainbow() {
             else if (c == "v") c = (unicode == 1) ? "▄" : "_"
             else if (c == "%") { k = 0.6; c = (unicode == 1) ? "▓" : "%" }
             else if (c == ":") { k = 0.3; c = (unicode == 1) ? "░" : "." }
-            out = out paint((i - 1) / (width - 1), k) c
+            p = (pairs == "trail") ? pos(substr(trl, i, 1)) : (i - 1) / (width - 1)
+            out = out paint(p, k) c
         }
         print out (mode == "none" ? "" : "\033[0m")
     }'
@@ -187,26 +192,40 @@ rainbow() {
 snake_art() {
     cat <<'SNAKE'
        vvvvvvvvvvvvvvvvvvvvvvvv  vv######v
+       EEEEEFFGGHHIIJJKLLMMNNOO  QQRSSTTUU
     v#################################%%###v      v
+    DDDDDDEEFFGGHHIIJJKLLMMNNOOPPQQRSSSSUUVV      Z
    ############################^#############vvvv^%%%
+   CCCCCDDEEFFGGHHIIJJKLLMMNNOOPPQQRSSTTUUVVWWXXYYYZZ
   #####%%%%%%%%%%%%%%%%%%%%%%%%%%^^#####^^^^%%%%%^v%::
+  CBBBBCCCDDEEFFGHHIIJJKKLLMMNNOOQQRSSTTUUVVVWWXXYZYYZ
   #####%%::::::::::::::::::::::::: %%%%%%%%%%%:::::%%
+  CBBAABBCCDDEEFFGGHHIIJJKLLMMNNOO QRRSSTTUUVVVWWXXZZ
    ################################vv :::::          :
+   BBAAzzyyxxwwvuuttssrrqqppoonnnnnmm RSSTT          Z
     ^#################################v
+    BAAzzyyxxwwvuuttssrrqqppoonmmmmmmml
       %^^^^^^^^^^^^^^^^^^^^^^^^^^^^####v%
+      Azzyyxxwwvuuttssrrqqppoonmmllllllll
         :%%%%%%%%%%%%%%%%%%%%%%%%%%#####%%
+        Azzyyxxwwvuuttssrrqqppoonmmkkkklll
                    vvvvvvvvvvvvvvvv####^%%:
+                   abbccddeefgghhiijjkkllll
 vvvvvvv###############################^%%%:
+011223344556677899aabbccddeefgghhiijjkkkkll
  %%%%%%^^^^^^^^^^^^################^^%%%%:
+ 00112244556677899aabbccddeefgghhiijjjkkkk
    ::::::%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%::
+   01122344556677899aabccddeeffgghhiijjjk
                       ::::::::::::::::
+                      abbccddeefgghhii
 SNAKE
 }
 
 # One picture of the banner, its colours turned by phase (see rainbow).
 paint_banner() {
     printf '\n'
-    snake_art | rainbow 54 "$1"
+    snake_art | rainbow 54 "$1" trail
     printf '\n  %s' "$BOLD"
     printf 'y u r l u n g r' | rainbow 15 "$1" | tr -d '\n'
     printf '\n  %sa terminal workspace for coding agents%s\n\n' "$DIM" "$RESET"

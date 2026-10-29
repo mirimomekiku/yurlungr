@@ -1,0 +1,14 @@
+       EEEEEFFGGHHIIJJKLLMMNNOO  QQRSSTTUU
+    DDDDDDEEFFGGHHIIJJKLLMMNNOOPPQQRSSSSUUVV      Z
+   CCCCCDDEEFFGGHHIIJJKLLMMNNOOPPQQRSSTTUUVVWWXXYYYZZ
+  CBBBBCCCDDEEFFGHHIIJJKKLLMMNNOOQQRSSTTUUVVVWWXXYZYYZ
+  CBBAABBCCDDEEFFGGHHIIJJKLLMMNNOO QRRSSTTUUVVVWWXXZZ
+   BBAAzzyyxxwwvuuttssrrqqppoonnnnnmm RSSTT          Z
+    BAAzzyyxxwwvuuttssrrqqppoonmmmmmmml
+      Azzyyxxwwvuuttssrrqqppoonmmllllllll
+        Azzyyxxwwvuuttssrrqqppoonmmkkkklll
+                   abbccddeefgghhiijjkkllll
+011223344556677899aabbccddeefgghhiijjkkkkll
+ 00112244556677899aabbccddeefgghhiijjjkkkk
+   01122344556677899aabccddeeffgghhiijjjk
+                      abbccddeefgghhii
