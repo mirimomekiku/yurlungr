@@ -21,8 +21,41 @@ const AGENTS: &[(&str, &str)] = &[
     ("qodercli", "qoder"),
     ("copilot", "copilot"),
     ("grok", "grok"),
-    ("kilo", "kilo"),
+    // Not plain `kilo`: that is also a well-known tiny text editor.
+    ("kilocode", "kilo"),
 ];
+
+/// `goose` is also a database migration tool. Its subcommands and database
+/// drivers never occur in the coding agent's command line.
+const GOOSE_DB_WORDS: &[&str] = &[
+    "up",
+    "up-by-one",
+    "up-to",
+    "down",
+    "down-to",
+    "redo",
+    "reset",
+    "status",
+    "version",
+    "create",
+    "fix",
+    "validate",
+    "postgres",
+    "mysql",
+    "sqlite3",
+    "mssql",
+    "clickhouse",
+    "redshift",
+    "tidb",
+    "turso",
+    "vertica",
+    "ydb",
+];
+
+/// Whether `args` (everything after the program) really is the agent `name`.
+fn is_invocation(name: &str, args: &[String]) -> bool {
+    name != "goose" || !args.iter().any(|a| GOOSE_DB_WORDS.contains(&a.as_str()))
+}
 
 /// Agents installed from npm/pip run as `node /path/to/<package>/cli.js`, where
 /// only the package directory names the agent.
@@ -62,7 +95,7 @@ pub fn detect(args: &[String]) -> Option<&'static str> {
     let first = args.first()?;
     let program = base(first);
     if let Some(agent) = by_name(&program) {
-        return Some(agent);
+        return is_invocation(agent, &args[1..]).then_some(agent);
     }
     if !RUNTIMES.contains(&program.as_str()) {
         return None;
@@ -165,6 +198,16 @@ mod tests {
             assert_eq!(detect(&args(cmd)), None, "{cmd}");
         }
         assert_eq!(detect(&[]), None);
+    }
+
+    #[test]
+    fn lookalike_tools_are_not_agents() {
+        assert_eq!(detect(&args("goose session")), Some("goose"));
+        assert_eq!(detect(&args("goose run -t hello")), Some("goose"));
+        assert_eq!(detect(&args("goose postgres postgres://x up")), None);
+        assert_eq!(detect(&args("goose -dir migrations status")), None);
+        assert_eq!(detect(&args("kilo notes.txt")), None);
+        assert_eq!(detect(&args("kilocode")), Some("kilo"));
     }
 
     // Reads /proc or runs `ps`, neither of which exists on Windows.
