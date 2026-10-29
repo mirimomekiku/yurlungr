@@ -12,7 +12,9 @@ use std::{
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::{agents, proto::ReportState};
+#[cfg(unix)]
+use crate::agents;
+use crate::proto::ReportState;
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
