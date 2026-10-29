@@ -240,7 +240,13 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
         # ---- uninstall -------------------------------------------------------
         if ($uninstall) {
             if (Test-Path $exe) {
-                try { & $exe integration uninstall 2>&1 | Out-Null; Write-Ok 'Removed agent hooks' } catch { }
+                $hooksRemoved = $false
+                try {
+                    & $exe integration uninstall 2>&1 | Out-Null
+                    $hooksRemoved = ($LASTEXITCODE -eq 0)
+                } catch { }
+                if ($hooksRemoved) { Write-Ok 'Removed agent hooks' }
+                else { Write-Note 'Could not remove the agent hooks; run: yurlungr integration uninstall' }
                 try {
                     Remove-Item -Path $exe -Force
                     Write-Ok "Removed $exe"
