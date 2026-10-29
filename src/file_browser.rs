@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -86,6 +87,30 @@ impl FileBrowser {
 // None of these ever overwrite: a destination that already exists is an error,
 // except `copy_into`, which picks a free name.
 
+/// Replace a file's contents through a temp file in the same folder, so a crash
+/// never leaves it half written. A symlink is followed (the link stays a link)
+/// and the existing permissions are kept.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(".yurlungr.tmp");
+    let tmp = PathBuf::from(tmp);
+    let result = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        if let Ok(meta) = fs::metadata(&target) {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, &target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// A single path component: no separators, not empty, not `.` or `..`.
 pub fn valid_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." {
@@ -135,10 +160,12 @@ pub fn move_to(src: &Path, dest: &str, cwd: &Path) -> Result<PathBuf> {
     if dest.is_empty() {
         bail!("no destination given");
     }
-    let mut dst = match dest.strip_prefix("~/") {
-        Some(rest) => {
-            PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(rest)
-        }
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let mut dst = match dest.strip_prefix("~/").or_else(|| dest.strip_prefix("~\\")) {
+        Some(rest) => PathBuf::from(
+            std::env::var_os(home_var).with_context(|| format!("{home_var} is not set"))?,
+        )
+        .join(rest),
         None => PathBuf::from(dest),
     };
     if dst.is_relative() {
@@ -170,7 +197,12 @@ pub fn move_to(src: &Path, dest: &str, cwd: &Path) -> Result<PathBuf> {
 /// Copy `src` into `dir`, appending " copy" / " copy N" if the name is taken.
 pub fn copy_into(src: &Path, dir: &Path) -> Result<PathBuf> {
     let name = src.file_name().context("nothing to copy")?.to_string_lossy().into_owned();
-    if src.is_dir() && dir.starts_with(src) {
+    // Compare real paths too: `dir` may reach `src` through a symlink.
+    let inside = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a.starts_with(b),
+        _ => false,
+    };
+    if src.is_dir() && (dir.starts_with(src) || inside(dir, src)) {
         bail!("cannot copy a folder into itself");
     }
     let dst = unique_dest(dir, &name);
@@ -318,6 +350,42 @@ mod tests {
             delete(&link).unwrap();
             assert!(!link.exists() && target.join("f").exists());
         }
+    }
+
+    #[test]
+    fn write_atomic_replaces_contents_and_leaves_no_temp() {
+        let d = tmp();
+        let f = d.path().join("c.json");
+        fs::write(&f, "old").unwrap();
+        write_atomic(&f, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), "new");
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_keeps_mode_and_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp();
+        let real = d.path().join("real");
+        fs::write(&real, "old").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_through_a_symlink_into_itself_is_refused() {
+        let d = tmp();
+        let sub = create_dir(d.path(), "proj").unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+        assert!(copy_into(&sub, &link).is_err());
     }
 
     #[test]
