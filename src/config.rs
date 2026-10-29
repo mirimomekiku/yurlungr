@@ -116,8 +116,15 @@ impl Config {
     }
 
     fn save_to(&self, path: &Path) -> Result<()> {
-        let mut table: toml::Table =
-            fs::read_to_string(path).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default();
+        // A file we cannot parse must not be rewritten from scratch: that would
+        // throw away whatever the user has in it.
+        let mut table: toml::Table = match fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text).with_context(|| {
+                format!("{} is not valid TOML; fix it first (nothing was saved)", path.display())
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+            Err(e) => return Err(e.into()),
+        };
 
         if self.theme == "default" {
             table.remove("theme");
@@ -134,11 +141,7 @@ impl Config {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        fs::write(&tmp, toml::to_string_pretty(&table)?)?;
-        fs::rename(&tmp, path)?;
+        crate::file_browser::write_atomic(path, toml::to_string_pretty(&table)?.as_bytes())?;
         Ok(())
     }
 }
@@ -197,5 +200,18 @@ mod tests {
         reset.save_to(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("theme") && !text.contains("[keys]"), "{text}");
+    }
+
+    #[test]
+    fn save_refuses_to_overwrite_a_file_that_is_not_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let broken = "[colors]\naccent = \"red\"\n[keys\n";
+        fs::write(&path, broken).unwrap();
+
+        let mut c = Config::parse(broken);
+        c.theme = "dracula".into();
+        assert!(c.save_to(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
     }
 }

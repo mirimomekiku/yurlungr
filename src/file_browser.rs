@@ -89,14 +89,22 @@ impl FileBrowser {
 
 /// Replace a file's contents through a temp file in the same folder, so a crash
 /// never leaves it half written. A symlink is followed (the link stays a link)
-/// and the existing permissions are kept.
+/// and the existing permissions are kept. Hard-linked files, and files in a
+/// folder we cannot create files in, are written in place instead.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut tmp = target.as_os_str().to_owned();
     tmp.push(".yurlungr.tmp");
     let tmp = PathBuf::from(tmp);
     let result = (|| {
-        let mut f = fs::File::create(&tmp)?;
+        let mut f = match fs::File::create(&tmp) {
+            Ok(f) => f,
+            // A writable file in a folder we cannot add files to: write in place.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && target.is_file() => {
+                return fs::write(&target, bytes);
+            }
+            Err(e) => return Err(e),
+        };
         if let Ok(meta) = fs::metadata(&target) {
             f.set_permissions(meta.permissions())?;
         }
@@ -112,6 +120,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// A single path component: no separators, not empty, not `.` or `..`.
+    // A hard-linked file would be detached from its other names by a rename.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(&target).is_ok_and(|m| m.nlink() > 1) {
+            return fs::write(&target, bytes);
+        }
+    }
 pub fn valid_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." {
         bail!("invalid name");
@@ -398,6 +414,18 @@ mod tests {
         let mut fb = FileBrowser::new(d.path().to_path_buf()).unwrap();
         let names: Vec<_> = fb.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["zdir", ".hidden", "b.txt"]);
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_writes_in_place_for_hard_links() {
+        let d = tmp();
+        let a = d.path().join("a");
+        let b = d.path().join("b");
+        fs::write(&a, "old").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        write_atomic(&a, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&b).unwrap(), "new");
+    }
+
         fb.show_hidden = false;
         fb.reload().unwrap();
         assert_eq!(fb.entries.len(), 2);
