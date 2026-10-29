@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="yurlungr: a 2.5D rainbow snake whose colours slowly shift" width="560">
+  <img src="assets/logo.svg" alt="yurlungr: a 2.5D rainbow snake whose colours run along its body" width="560">
 </p>
 
 <p align="center">
@@ -40,7 +40,7 @@ yurlungr
 ```
 
 The installers (and `yurlungr setup`) greet you with the snake: a 2.5D rainbow snake whose colours
-flow once around it on a colour terminal. Set `YURLUNGR_NO_ANIM=1` to skip the animation; it is
+run along its body, tail to head, round every bend, once through on a colour terminal. Set `YURLUNGR_NO_ANIM=1` to skip the animation; it is
 also skipped automatically when output is piped or has no colour.
 
 <details>
@@ -97,7 +97,8 @@ Requires Rust 1.85+ and a C compiler. Development: `cargo test`, `cargo fmt`,
 `cargo clippy`. Architecture notes are in [`CLAUDE.md`](CLAUDE.md).
 
 The snake is generated: edit the flat snake in `assets/snake-face.txt`, then run
-`python scripts/make-snake.py` (builds the shaded 2.5D `assets/snake.txt`) and
+`python scripts/make-snake.py` (builds the shaded 2.5D `assets/snake.txt` and the
+`assets/snake-trail.txt` that tells every cell where it lies along the body) and
 `python scripts/make-logo.py` (builds the animated `assets/logo.svg`). Tests fail if the
 installers' embedded copies drift from `assets/snake.txt`.
 
