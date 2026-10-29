@@ -328,7 +328,9 @@ impl App {
             focus: self.focus,
         };
         if let Ok(json) = serde_json::to_string(&saved) {
-            if json != self.last_saved && fs::write(path, &json).is_ok() {
+            if json != self.last_saved
+                && crate::file_browser::write_atomic(path, json.as_bytes()).is_ok()
+            {
                 self.last_saved = json;
             }
         }

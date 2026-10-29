@@ -147,7 +147,7 @@ impl EditorView {
     }
 
     pub fn save(&mut self) -> Result<()> {
-        fs::write(&self.path, self.contents())?;
+        crate::file_browser::write_atomic(&self.path, self.contents().as_bytes())?;
         self.dirty = false;
         Ok(())
     }

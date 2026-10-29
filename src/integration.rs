@@ -264,7 +264,11 @@ fn command(exe: &Path, agent: Agent, state: &str) -> String {
 }
 
 fn is_ours(cmd: &str) -> bool {
-    cmd.to_lowercase().contains("yurlungr") && cmd.contains(" hook ")
+    // Our commands look like `"<path>/yurlungr" hook <agent> <state>`.
+    let Some((exe, _)) = cmd.rsplit_once(" hook ") else { return false };
+    Path::new(exe.trim().trim_matches('"'))
+        .file_stem()
+        .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("yurlungr"))
 }
 
 fn entry_is_ours(entry: &Value, style: Style) -> bool {
@@ -295,7 +299,7 @@ fn save(path: &Path, value: &Value) -> Result<()> {
     save_text(path, &(serde_json::to_string_pretty(value)? + "\n"))
 }
 
-/// Write via a temp file, keeping a one-time `.yurlungr.bak` of the original.
+/// Write atomically (keeping permissions and symlinks), keeping a one-time `.yurlungr.bak` of the original.
 fn save_text(path: &Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -308,11 +312,7 @@ fn save_text(path: &Path, text: &str) -> Result<()> {
             fs::copy(path, &backup)?;
         }
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".yurlungr.tmp");
-    let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path)?;
+    crate::file_browser::write_atomic(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -513,6 +513,14 @@ mod tests {
         root["hooks"]
             .as_object()
             .map_or(0, |h| h.values().map(|v| v.as_array().unwrap().len()).sum())
+    }
+
+    #[test]
+    fn only_our_own_hook_commands_are_recognised() {
+        assert!(is_ours(&command(Path::new(EXE), Agent::Claude, "idle")));
+        assert!(is_ours("\"/opt/a hook b/yurlungr\" hook codex working"));
+        assert!(!is_ours("/home/me/yurlungr/notify.sh hook deploy"));
+        assert!(!is_ours("echo yurlungr"));
     }
 
     #[test]
