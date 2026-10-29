@@ -201,6 +201,7 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
             app.detach = false;
             if let Some(mut c) = client.take() {
                 let _ = proto::send(&mut c.stream, &ServerMsg::Detached);
+        app.poll_files();
             }
         }
         if let Some(c) = &mut client {

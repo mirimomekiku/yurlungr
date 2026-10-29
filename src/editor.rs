@@ -4,6 +4,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{bail, Context, Result};
@@ -36,6 +37,12 @@ pub struct EditorView {
     final_newline: bool,
     /// The file had no content; the first edit gives it a trailing newline.
     fresh_empty: bool,
+    /// The file's modification time when it was read or last saved.
+    disk_time: Option<SystemTime>,
+    /// Set after a save was refused because the file changed on disk: the next
+    /// save goes through.
+    overwrite_ok: bool,
+    last_check: Instant,
     /// Size of the text area, set by the renderer each frame.
     pub height: usize,
     pub width: usize,
@@ -126,6 +133,9 @@ impl EditorView {
             crlf,
             final_newline,
             fresh_empty: text.is_empty(),
+            disk_time: meta.modified().ok(),
+            overwrite_ok: false,
+            last_check: Instant::now(),
             height: 20,
             width: 80,
         })
@@ -146,10 +156,42 @@ impl EditorView {
         text
     }
 
+    fn modified(&self) -> Option<SystemTime> {
+        fs::metadata(&self.path).and_then(|m| m.modified()).ok()
+    }
+
+    /// Whether the file was changed (or removed) by someone else since we read it.
+    pub fn changed_on_disk(&self) -> bool {
+        self.modified() != self.disk_time
+    }
+
+    /// Saving over a version that appeared meanwhile (an agent editing the same
+    /// file, say) is refused once; asking again confirms the overwrite.
     pub fn save(&mut self) -> Result<()> {
+        if !self.overwrite_ok && self.changed_on_disk() {
+            self.overwrite_ok = true;
+            bail!(
+                "{} changed on disk since it was opened: save again to overwrite it, or reload to see it",
+                self.name()
+            );
+        }
         crate::file_browser::write_atomic(&self.path, self.contents().as_bytes())?;
+        self.disk_time = self.modified();
+        self.overwrite_ok = false;
         self.dirty = false;
         Ok(())
+    }
+
+    /// Re-read a viewer with no unsaved edits when its file changed. Cheap: it
+    /// looks at the file at most once a second.
+    pub fn refresh_if_clean(&mut self) {
+        if self.dirty || self.last_check.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_check = Instant::now();
+        if self.changed_on_disk() {
+            let _ = self.reload();
+        }
     }
 
     fn reload(&mut self) -> Result<()> {
@@ -395,6 +437,44 @@ mod tests {
         let path = dir.path().join("f.txt");
         fs::write(&path, text).unwrap();
         (dir, EditorView::open(&path).unwrap())
+    }
+
+    /// Make the file's modification time differ, as another program's write would.
+    fn touch_on_disk(v: &EditorView, text: &str) {
+        fs::write(&v.path, text).unwrap();
+        let later = SystemTime::now() + Duration::from_secs(5);
+        fs::File::options().write(true).open(&v.path).unwrap().set_modified(later).unwrap();
+    }
+
+    #[test]
+    fn saving_over_a_changed_file_needs_a_second_confirmation() {
+        let (_d, mut v) = editor("mine\n");
+        touch_on_disk(&v, "theirs\n");
+        assert!(v.changed_on_disk());
+        assert!(v.save().is_err(), "first save is refused");
+        assert_eq!(fs::read_to_string(&v.path).unwrap(), "theirs\n");
+        v.save().unwrap();
+        assert_eq!(fs::read_to_string(&v.path).unwrap(), "mine\n");
+        assert!(!v.changed_on_disk());
+    }
+
+    #[test]
+    fn a_clean_viewer_follows_the_file() {
+        let (_d, mut v) = editor("old\n");
+        touch_on_disk(&v, "new\n");
+        v.last_check = Instant::now() - Duration::from_secs(2);
+        v.refresh_if_clean();
+        assert_eq!(v.lines, ["new"]);
+    }
+
+    #[test]
+    fn a_dirty_viewer_is_never_reloaded() {
+        let (_d, mut v) = editor("old\n");
+        v.dirty = true;
+        touch_on_disk(&v, "new\n");
+        v.last_check = Instant::now() - Duration::from_secs(2);
+        v.refresh_if_clean();
+        assert_eq!(v.lines, ["old"]);
     }
 
     /// Press a key the way the app does: resolve it through the default keymap first.

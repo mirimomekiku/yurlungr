@@ -1160,6 +1160,16 @@ impl App {
         }
     }
 
+    /// Keep open file viewers in step with the disk, so a file an agent just
+    /// changed is not shown (or saved over) in its old state.
+    pub fn poll_files(&mut self) {
+        for pane in self.panes.values_mut() {
+            if let Pane::Editor(v) = pane {
+                v.refresh_if_clean();
+            }
+        }
+    }
+
     /// Pick up edits made to the config file while the session is running.
     pub fn poll_config(&mut self) {
         if self.config_checked.elapsed() < CONFIG_POLL {
