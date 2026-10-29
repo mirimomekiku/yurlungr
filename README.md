@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="yurlungr: a rainbow snake" width="560">
+  <img src="assets/logo.svg" alt="yurlungr: a 2.5D rainbow snake whose colours slowly shift" width="560">
 </p>
 
 <p align="center">
@@ -38,6 +38,10 @@ that folder to your `PATH`. Open a new terminal window and type:
 ```sh
 yurlungr
 ```
+
+The installers (and `yurlungr setup`) greet you with the snake: a 2.5D rainbow snake whose colours
+flow once around it on a colour terminal. Set `YURLUNGR_NO_ANIM=1` to skip the animation; it is
+also skipped automatically when output is piped or has no colour.
 
 <details>
 <summary><b>What exactly does the installer do?</b></summary>
@@ -91,6 +95,11 @@ cargo install --path .        # installs to ~/.cargo/bin
 
 Requires Rust 1.85+ and a C compiler. Development: `cargo test`, `cargo fmt`,
 `cargo clippy`. Architecture notes are in [`CLAUDE.md`](CLAUDE.md).
+
+The snake is generated: edit the flat snake in `assets/snake-face.txt`, then run
+`python scripts/make-snake.py` (builds the shaded 2.5D `assets/snake.txt`) and
+`python scripts/make-logo.py` (builds the animated `assets/logo.svg`). Tests fail if the
+installers' embedded copies drift from `assets/snake.txt`.
 
 </details>
 
@@ -147,12 +156,22 @@ which files it changed.
   `codex`, `opencode`, `gemini`, `qwen`, `kimi`, `droid`, `aider` and more), so they show up with
   no setup (on Windows an agent appears once its hooks report in, since a pty's foreground process can't be inspected there). States are **working**, **blocked** (waiting for you), **done** (finished while you were
   looking elsewhere) and **idle**. Install hooks for exact state (below).
+- **Works in any terminal.** The theme's colours are lowered to what your terminal can show
+  (truecolor, 256 or 16 colours; override with `YURLUNGR_COLORS=truecolor|256|16`), and yurlungr
+  says so clearly if it has no terminal to draw on. Keys a terminal keeps for itself have prefix
+  fallbacks (see the terminal note below).
+- **One window per session.** Starting `yurlungr` on a session that is already open in another
+  terminal is refused, so two windows never fight over it. Detach there (`Ctrl+B d`), or pass
+  `--force` (`-f`) to take the session over; the other window is detached.
 - **Splits.** `Ctrl+Left`, `Ctrl+Right` and `Ctrl+Down` split the focused pane. Drag the dividers
-  to resize; right-click for a menu.
+  to resize; right-click for a menu, which also has **Open in Explorer** (Finder, or your file
+  manager) for the pane's folder.
 - **Git graph pane.** Commit lanes, plus a detail panel with the full id, author and committer
   (with timestamps), parents, message, and changed files with `+`/`-` counts.
-- **File browser and editor.** Create, rename, move, copy, cut, paste and delete with confirmation,
-  and a small modal text editor. One file viewer per workspace.
+- **File browser and editor.** Create, rename, move, copy, cut, paste and delete (only `y`
+  confirms; deleting is permanent), and a small modal text editor. One file viewer per workspace.
+  The viewer follows its file on disk, so a file an agent just changed is not shown stale, and
+  saving over a file that changed since you opened it is refused once (save again to overwrite).
 - **Asks before it destroys anything.** Closing a workspace, a terminal pane, or an editor with
   unsaved changes opens a confirmation (the safe answer is the default).
 - **Everything is rebindable.** A keybinding dialog (`Ctrl+B ?`) edits every key and saves to
@@ -193,6 +212,18 @@ In a **file browser**: `n` new file, `N` new folder, `r` rename, `m` move, `c` c
 > whether a key reaches the app. `Ctrl+Left` / `Ctrl+Right` normally jump by word in a shell;
 > rebind the splits if you rely on that.
 
+## Sessions
+
+```sh
+yurlungr                 # attach to the session "default" (starts it if needed)
+yurlungr -s work         # a named session; sessions are independent
+yurlungr --force         # take over a session that is open in another terminal
+yurlungr kill            # stop a session's server and all its shells
+```
+
+`yurlungr kill` also tells a window that is still attached that the session ended. A session
+started by an older version does not understand it; `kill` then reports that it did not stop.
+
 ## Agent status hooks
 
 Detection works with nothing installed. For exact working / blocked / idle state from the agent
@@ -224,6 +255,15 @@ prefix = "ctrl+a"
 close_pane = ["prefix x", "alt+w"]
 split_left = []         # unbound
 ```
+
+If `config.toml` is not valid TOML, yurlungr uses the defaults and will not overwrite the file when
+you change a setting; fix the file first. Environment variables:
+
+| Variable | Effect |
+|---|---|
+| `YURLUNGR_COLORS` | `truecolor`, `256` or `16`: force the colour depth instead of guessing it |
+| `YURLUNGR_NO_ANIM` | `1` turns off the banner animation |
+| `NO_COLOR` | no colour in the banner |
 
 ## Platforms
 
