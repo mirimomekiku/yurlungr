@@ -186,7 +186,7 @@ impl Prompt {
             PromptKind::Rename(_) => "rename to".to_string(),
             PromptKind::Move(_) => "move to".to_string(),
             PromptKind::Delete(p) => format!(
-                "delete '{}'? (y/n)",
+                "delete '{}' for good? y = delete, anything else cancels",
                 p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
             ),
         }
@@ -342,7 +342,7 @@ impl FilesView {
                 };
                 let dir = self.fb.dir.clone();
                 let dst = if c.cut {
-                    file_browser::move_to(&c.path, &dir.to_string_lossy(), &dir)?
+                    file_browser::move_into(&c.path, &dir)?
                 } else {
                     file_browser::copy_into(&c.path, &dir)?
                 };
@@ -386,7 +386,8 @@ impl FilesView {
     fn prompt_key(&mut self, code: KeyCode, clip: &mut Option<Clip>) -> Result<FilesAct> {
         let Some(prompt) = self.prompt.as_mut() else { return Ok(FilesAct::None) };
         if prompt.is_confirm() {
-            let yes = matches!(code, KeyCode::Char('y' | 'Y') | KeyCode::Enter);
+            // Only an explicit y: deleting is permanent, so Enter must not confirm.
+            let yes = matches!(code, KeyCode::Char('y' | 'Y'));
             let Some(Prompt { kind: PromptKind::Delete(path), .. }) = self.prompt.take() else {
                 return Ok(FilesAct::None);
             };

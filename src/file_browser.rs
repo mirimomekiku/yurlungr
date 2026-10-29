@@ -207,6 +207,16 @@ pub fn move_to(src: &Path, dest: &str, cwd: &Path) -> Result<PathBuf> {
     if dst.is_relative() {
         dst = cwd.join(dst);
     }
+    move_path(src, dst)
+}
+
+/// Move `src` into the folder `dir` under its own name. Unlike `move_to` the
+/// folder is a path, not text, so names with spaces or odd characters are safe.
+pub fn move_into(src: &Path, dir: &Path) -> Result<PathBuf> {
+    move_path(src, dir.to_path_buf())
+}
+
+fn move_path(src: &Path, mut dst: PathBuf) -> Result<PathBuf> {
     if dst.is_dir() {
         dst = dst.join(src.file_name().context("nothing to move")?);
     }
@@ -350,6 +360,17 @@ mod tests {
         fs::write(sub.join("b.txt"), "x").unwrap();
         assert!(move_to(&b, "sub", d.path()).is_err(), "existing destination");
         assert!(move_to(&b, "missing/x", d.path()).is_err(), "missing parent");
+    }
+
+    #[test]
+    fn move_into_does_not_trim_the_folder_name() {
+        let d = tmp();
+        let f = create_file(d.path(), "a.txt").unwrap();
+        let spaced = create_dir(d.path(), " sp").unwrap();
+        create_dir(d.path(), "sp").unwrap();
+        let moved = move_into(&f, &spaced).unwrap();
+        assert_eq!(moved, spaced.join("a.txt"));
+        assert!(!d.path().join("sp").join("a.txt").exists());
     }
 
     #[test]
