@@ -1,12 +1,39 @@
-//! The yurlungr brand: a rainbow snake, red at the tail through violet at the
-//! head. The picture is plain text in `assets/snake.txt`; its colour is a
-//! function of the column, so any program (the installers are shell and
-//! PowerShell) can paint it the same way with no colour data of its own.
+//! The yurlungr brand: a 2.5D rainbow snake, red at the tail through violet at
+//! the head, whose colours slowly shift. The picture is plain text in
+//! `assets/snake.txt` (made by `scripts/make-snake.py`): a lit face, a darker
+//! side and a faint shadow, told apart by their glyphs. Its colour is a
+//! function of the column, the glyph and a time phase, so any program (the
+//! installers are shell and PowerShell) can paint and animate it the same way
+//! with no colour data of its own.
 
-use std::fmt::Write as _;
+use std::{
+    fmt::Write as _,
+    io::{self, Write as _},
+    thread,
+    time::Duration,
+};
 
-/// The snake, as block characters.
+/// The snake, as block and shade characters.
 pub const SNAKE: &str = include_str!("../assets/snake.txt");
+
+/// How bright each glyph class is painted: the lit face, the side, the shadow.
+pub const SHADE_FACE: f64 = 1.0;
+pub const SHADE_SIDE: f64 = 0.6;
+pub const SHADE_SHADOW: f64 = 0.3;
+
+/// The brightness of a snake glyph, or `None` for anything that is not paint.
+pub fn shade(c: char) -> Option<f64> {
+    match c {
+        '█' | '▀' | '▄' => Some(SHADE_FACE),
+        '▓' => Some(SHADE_SIDE),
+        '░' => Some(SHADE_SHADOW),
+        _ => None,
+    }
+}
+
+/// Animation: one full turn of the rainbow over `FRAMES` frames.
+const FRAMES: usize = 24;
+const FRAME_TIME: Duration = Duration::from_millis(55);
 
 pub const NAME: &str = "yurlungr";
 pub const TAGLINE: &str = "a terminal workspace for coding agents";
@@ -48,7 +75,15 @@ const HUE_SPAN: f64 = 0.83;
 
 /// The rainbow colour at `position` in `0.0..=1.0`.
 pub fn rainbow(position: f64) -> (u8, u8, u8) {
-    let hue = position.clamp(0.0, 1.0) * HUE_SPAN * 6.0; // 0..~5
+    rainbow_at(position, 0.0)
+}
+
+/// The rainbow at `position`, turned `phase` of the way round the hue circle.
+/// Phase 0 (and every whole number) is the plain rainbow; raising it steadily
+/// makes the colours flow along the snake.
+pub fn rainbow_at(position: f64, phase: f64) -> (u8, u8, u8) {
+    let turn = (position.clamp(0.0, 1.0) * HUE_SPAN + phase).rem_euclid(1.0);
+    let hue = turn * 6.0; // 0..6
     let (saturation, value) = (0.9, 1.0);
     let sector = hue.floor() as i32;
     let f = hue - hue.floor();
@@ -93,13 +128,24 @@ fn reset(out: &mut String, color: Color) {
     }
 }
 
-/// `text` with the rainbow running across its width. Spaces stay uncoloured.
+fn dim((r, g, b): (u8, u8, u8), k: f64) -> (u8, u8, u8) {
+    let scale = |c: u8| (f64::from(c) * k).round() as u8;
+    (scale(r), scale(g), scale(b))
+}
+
+/// `text` with the rainbow running across its width. Spaces stay uncoloured;
+/// shade glyphs are painted darker, by class.
 pub fn gradient(text: &str, width: usize, color: Color) -> String {
+    gradient_at(text, width, color, 0.0)
+}
+
+pub fn gradient_at(text: &str, width: usize, color: Color, phase: f64) -> String {
     let mut out = String::new();
     let last = width.saturating_sub(1).max(1) as f64;
     for (i, ch) in text.chars().enumerate() {
         if ch != ' ' {
-            paint(&mut out, color, rainbow(i as f64 / last));
+            let rgb = rainbow_at(i as f64 / last, phase);
+            paint(&mut out, color, dim(rgb, shade(ch).unwrap_or(1.0)));
         }
         out.push(ch);
     }
@@ -113,10 +159,15 @@ fn width() -> usize {
 
 /// The snake, the name and the tagline, ready to print.
 pub fn banner(color: Color) -> String {
+    banner_at(color, 0.0)
+}
+
+/// The banner with its colours turned `phase` of the way round the rainbow.
+pub fn banner_at(color: Color, phase: f64) -> String {
     let w = width();
     let mut out = String::new();
     for line in SNAKE.lines() {
-        out.push_str(&gradient(line, w, color));
+        out.push_str(&gradient_at(line, w, color, phase));
         out.push('\n');
     }
     out.push('\n');
@@ -126,7 +177,7 @@ pub fn banner(color: Color) -> String {
     if color != Color::None {
         out.push_str("\x1b[1m");
     }
-    out.push_str(&gradient(name, name.chars().count(), color));
+    out.push_str(&gradient_at(name, name.chars().count(), color, phase));
     out.push('\n');
     if color != Color::None {
         out.push_str(&format!("  \x1b[2m{TAGLINE}\x1b[0m\n"));
@@ -134,6 +185,30 @@ pub fn banner(color: Color) -> String {
         out.push_str(&format!("  {TAGLINE}\n"));
     }
     out
+}
+
+/// Whether the user turned the animation off (`YURLUNGR_NO_ANIM=1`).
+fn motion_disabled() -> bool {
+    std::env::var_os("YURLUNGR_NO_ANIM").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Print the banner. With colour, and unless the animation is switched off, the
+/// rainbow flows once around the snake first and settles on the plain banner,
+/// which is what stays on screen (and all there is when output is piped).
+pub fn show(color: Color) {
+    let mut out = io::stdout().lock();
+    if color != Color::None && !motion_disabled() {
+        let lines = banner(color).lines().count();
+        let _ = write!(out, "\x1b[?25l"); // hide the cursor while it plays
+        for frame in 0..FRAMES {
+            let _ = write!(out, "{}\x1b[{lines}A", banner_at(color, frame as f64 / FRAMES as f64));
+            let _ = out.flush();
+            thread::sleep(FRAME_TIME);
+        }
+        let _ = write!(out, "\x1b[?25h");
+    }
+    let _ = write!(out, "{}", banner(color));
+    let _ = out.flush();
 }
 
 #[cfg(test)]
@@ -225,8 +300,64 @@ mod tests {
             SNAKE.trim_end(),
             "colouring never changes the picture"
         );
-        let blocks = SNAKE.chars().filter(|c| "█▀▄".contains(*c)).count();
-        assert_eq!(art_part.matches("\x1b[38;2;").count(), blocks, "one colour code per block");
+        let painted = SNAKE.chars().filter(|c| shade(*c).is_some()).count();
+        assert_eq!(art_part.matches("\x1b[38;2;").count(), painted, "one colour code per glyph");
+    }
+
+    #[test]
+    fn phase_zero_is_the_plain_rainbow_and_a_full_turn_comes_back() {
+        for i in 0..=20 {
+            let p = f64::from(i) / 20.0;
+            assert_eq!(rainbow_at(p, 0.0), rainbow(p));
+            assert_eq!(rainbow_at(p, 1.0), rainbow(p), "one whole turn is the same picture");
+        }
+        assert_ne!(rainbow_at(0.5, 0.0), rainbow_at(0.5, 0.25), "the colours move");
+        assert_eq!(banner_at(Color::Truecolor, 0.0), banner(Color::Truecolor));
+        assert_ne!(banner_at(Color::Truecolor, 0.3), banner(Color::Truecolor));
+    }
+
+    #[test]
+    fn every_frame_keeps_the_picture_and_stays_vivid() {
+        for frame in 0..FRAMES {
+            let phase = frame as f64 / FRAMES as f64;
+            let text = banner_at(Color::Truecolor, phase);
+            assert_eq!(
+                strip_escapes(
+                    &text.lines().take(SNAKE.lines().count()).collect::<Vec<_>>().join("\n")
+                ),
+                SNAKE.trim_end()
+            );
+            let (r, g, b) = rainbow_at(0.5, phase);
+            assert_eq!(r.max(g).max(b), 255, "vivid at frame {frame}");
+        }
+    }
+
+    #[test]
+    fn the_side_and_shadow_are_darker_than_the_face() {
+        let bright = |c: char| {
+            let s = gradient(&c.to_string(), 2, Color::Truecolor);
+            let nums: Vec<u32> = s
+                .trim_start_matches("\x1b[38;2;")
+                .split('m')
+                .next()
+                .unwrap()
+                .split(';')
+                .map(|n| n.parse().unwrap())
+                .collect();
+            *nums.iter().max().unwrap()
+        };
+        assert_eq!(bright('█'), 255);
+        assert_eq!(bright('▓'), (255.0 * SHADE_SIDE).round() as u32);
+        assert_eq!(bright('░'), (255.0 * SHADE_SHADOW).round() as u32);
+        assert!(shade('█') == shade('▀') && shade('▀') == shade('▄'));
+        assert_eq!(shade('x'), None);
+    }
+
+    #[test]
+    fn the_snake_has_a_face_a_side_and_a_shadow() {
+        for glyph in ["█", "▀", "▄", "▓", "░"] {
+            assert!(SNAKE.contains(glyph), "missing {glyph}");
+        }
     }
 
     #[test]
@@ -242,12 +373,16 @@ mod tests {
     #[test]
     fn the_art_is_a_snake_of_a_sensible_size() {
         let rows = SNAKE.lines().count();
-        assert!((5..=8).contains(&rows), "{rows} rows");
+        assert!((5..=10).contains(&rows), "{rows} rows");
         assert!(width() <= 60, "fits an 80-column terminal with room to spare");
-        assert!(SNAKE.chars().all(|c| "█▀▄ \n".contains(c)), "only block characters and spaces");
+        assert!(
+            SNAKE.chars().all(|c| "█▀▄▓░ \n".contains(c)),
+            "only block and shade characters and spaces"
+        );
     }
 
-    /// The picture as the installers embed it: `#` full block, `^` upper half, `v` lower half.
+    /// The picture as the installers embed it: `#` full block, `^` upper half,
+    /// `v` lower half, `%` side (dark shade), `:` shadow (light shade).
     fn ascii_coded() -> Vec<String> {
         SNAKE
             .lines()
@@ -257,6 +392,8 @@ mod tests {
                         '█' => '#',
                         '▀' => '^',
                         '▄' => 'v',
+                        '▓' => '%',
+                        '░' => ':',
                         _ => ' ',
                     })
                     .collect()
@@ -281,7 +418,7 @@ mod tests {
     fn the_powershell_installer_embeds_the_same_snake() {
         let script = include_str!("../install.ps1");
         let start = script.find("$art = @(\n").expect("the art array") + "$art = @(\n".len();
-        let end = start + script[start..].find("\n        )").expect("the end of the array");
+        let end = start + script[start..].find("\n    )").expect("the end of the array");
         let embedded: Vec<String> = script[start..end]
             .lines()
             .map(|l| l.trim().trim_end_matches(',').trim_matches('\'').to_string())

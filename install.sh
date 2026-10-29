@@ -141,13 +141,17 @@ die() {
 }
 
 # The rainbow, left to right. Reads ASCII text on stdin; prints it painted.
-# `#`, `^` and `v` in the snake art become the block characters.
+# Arguments: the width the rainbow spans, and a phase (0 = the plain rainbow,
+# 1 = once round the hue circle, the same picture again) that makes it flow.
+# In the snake art `#`, `^` and `v` become the lit face, `%` the darker side
+# (60%) and `:` the faint shadow (30%).
 rainbow() {
-    awk -v mode="$COLOR" -v unicode="$UNICODE" -v width="$1" '
+    awk -v mode="$COLOR" -v unicode="$UNICODE" -v width="$1" -v phase="${2:-0}" '
     function lvl(c) { return int(c / 255 * 5 + 0.5) }
-    function paint(p,    h, s, f, r, g, b, t, q, v) {
+    function paint(p, k,    h, s, f, r, g, b, t, q, v, x) {
         if (mode == "none") return ""
-        h = p * 0.83 * 6; s = int(h); f = h - s
+        x = p * 0.83 + phase; x = x - int(x)
+        h = x * 6; s = int(h); f = h - s
         v = 1; t = 1 - 0.9 * (1 - f); q = 1 - 0.9 * f; u = 0.1
         if (s == 0) { r = v; g = t; b = u }
         else if (s == 1) { r = q; g = v; b = u }
@@ -156,6 +160,7 @@ rainbow() {
         else if (s == 4) { r = t; g = u; b = v }
         else { r = v; g = u; b = q }
         r = int(r * 255 + 0.5); g = int(g * 255 + 0.5); b = int(b * 255 + 0.5)
+        r = int(r * k + 0.5); g = int(g * k + 0.5); b = int(b * k + 0.5)
         if (mode == "true") return sprintf("\033[38;2;%d;%d;%dm", r, g, b)
         return sprintf("\033[38;5;%dm", 16 + 36 * lvl(r) + 6 * lvl(g) + lvl(b))
     }
@@ -164,30 +169,61 @@ rainbow() {
         for (i = 1; i <= length($0); i++) {
             c = substr($0, i, 1)
             if (c == " ") { out = out " "; continue }
+            k = 1
             if (c == "#") c = (unicode == 1) ? "█" : "#"
             else if (c == "^") c = (unicode == 1) ? "▀" : "\""
             else if (c == "v") c = (unicode == 1) ? "▄" : "_"
-            out = out paint((i - 1) / (width - 1)) c
+            else if (c == "%") { k = 0.6; c = (unicode == 1) ? "▓" : "%" }
+            else if (c == ":") { k = 0.3; c = (unicode == 1) ? "░" : "." }
+            out = out paint((i - 1) / (width - 1), k) c
         }
         print out (mode == "none" ? "" : "\033[0m")
     }'
 }
 
-banner() {
-    printf '\n'
-    # The snake is ASCII-coded here (# full, ^ upper half, v lower half) because
-    # awk is byte-oriented; it is the same picture as assets/snake.txt.
-    rainbow 52 <<'SNAKE'
+# The snake is ASCII-coded here (# full, ^ upper half, v lower half; % side,
+# : shadow) because awk is byte-oriented; it is the same picture as
+# assets/snake.txt, made by scripts/make-snake.py.
+snake_art() {
+    cat <<'SNAKE'
                                        vv#v
             vv######v               vv###^^#v      v
-          v####^^^####v           v###########vvvv^
-        v###^       ^###v       v###^    ^^^###v  ^v
-^vv  vv###^           ^####vvv####^            ^
-  ^^##^^                ^^######^
+          v####^^^####v           v###########vvvv^%%%
+        v###^%%%%%%%^###v       v###^%%%%^^^###v%%^v%::
+^vv  vv###^%%%%:::::::^####vvv####^%%%%::::%%%%^%%::%%:
+  ^^##^^%%%%%::::       ^^######^%%%%::::    ::::%::  :
+    %%%%%%:::::           %%%%%%%%%::::            :
+      ::::::                :::::::::
 SNAKE
+}
+
+# One picture of the banner, its colours turned by phase (see rainbow).
+paint_banner() {
+    printf '\n'
+    snake_art | rainbow 55 "$1"
     printf '\n  %s' "$BOLD"
-    printf 'y u r l u n g r' | rainbow 15 | tr -d '\n'
+    printf 'y u r l u n g r' | rainbow 15 "$1" | tr -d '\n'
     printf '\n  %sa terminal workspace for coding agents%s\n\n' "$DIM" "$RESET"
+}
+
+# The rainbow flows once round the snake, then it settles. Only on a colour
+# terminal tall enough for it, and not with YURLUNGR_NO_ANIM=1.
+banner() {
+    rows=$(tput lines 2>/dev/null || echo 24)
+    if [ "$FANCY" = 1 ] && [ "$COLOR" != none ] && [ "${YURLUNGR_NO_ANIM:-0}" = 0 ] &&
+        [ "$rows" -ge 20 ] && sleep 0.05 2>/dev/null; then
+        lines=$(($(snake_art | wc -l) + 5))
+        printf '%s[?25l' "$ESC"
+        i=0
+        while [ "$i" -lt 24 ]; do
+            paint_banner "$(awk -v i="$i" 'BEGIN { printf "%.4f", i / 24 }')"
+            printf '%s[%dA' "$ESC" "$lines"
+            sleep 0.05
+            i=$((i + 1))
+        done
+        printf '%s[?25h' "$ESC"
+    fi
+    paint_banner 0
 }
 
 # Run a command behind a spinner. A failure prints the tail of its output.

@@ -55,7 +55,7 @@ fn ask(question: &str) -> bool {
 }
 
 pub fn run(yes: bool) -> Result<()> {
-    print!("{}", brand::banner(brand::Color::from_env(io::stdout().is_terminal())));
+    brand::show(brand::Color::from_env(io::stdout().is_terminal()));
     println!("\n  First-run setup\n");
     println!(
         "Hooks let each pane show exactly what its agent is doing (working / blocked / idle)."

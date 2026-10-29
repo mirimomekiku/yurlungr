@@ -41,9 +41,15 @@ function Install-Yurlungr {
     $plain = [bool]$env:NO_COLOR -or $redirected
 
     # ---- the rainbow ---------------------------------------------------------
-    # position 0..1 -> r, g, b (the same rainbow as the Linux installer and the app)
-    function Get-RainbowRgb([double]$position) {
-        $hue = [Math]::Min(1.0, [Math]::Max(0.0, $position)) * 0.83 * 6
+    # $phase turns the colours round the hue circle: 0 is the plain rainbow, 1 the
+    # same picture again. Show-Banner raises it to make the colours flow.
+    $phase = 0.0
+
+    # position 0..1 -> r, g, b (the same rainbow as the Linux installer and the app);
+    # $k dims it (1 = the lit face of the snake, 0.6 its side, 0.3 its shadow)
+    function Get-RainbowRgb([double]$position, [double]$k = 1.0) {
+        $turn = [Math]::Min(1.0, [Math]::Max(0.0, $position)) * 0.83 + $phase
+        $hue = ($turn - [Math]::Floor($turn)) * 6
         $sector = [int][Math]::Floor($hue)
         $f = $hue - [Math]::Floor($hue)
         $low = 0.1
@@ -57,7 +63,9 @@ function Install-Yurlungr {
             4 { $r = $t; $g = $low; $b = 1.0 }
             default { $r = 1.0; $g = $low; $b = $q }
         }
-        return @([int][Math]::Round($r * 255), [int][Math]::Round($g * 255), [int][Math]::Round($b * 255))
+        $up = [MidpointRounding]::AwayFromZero
+        $rgb = @([Math]::Round($r * 255, $up), [Math]::Round($g * 255, $up), [Math]::Round($b * 255, $up))
+        return @($rgb | ForEach-Object { [int][Math]::Round($_ * $k, $up) })
     }
 
     function Get-Ansi256([int[]]$rgb) {
@@ -84,7 +92,9 @@ function Install-Yurlungr {
             for ($i = 0; $i -lt $text.Length; $i++) {
                 $ch = $text[$i]
                 if ($ch -ne ' ') {
-                    $rgb = Get-RainbowRgb ($i / $last)
+                    $k = 1.0
+                    if ($ch -eq [char]0x2593) { $k = 0.6 } elseif ($ch -eq [char]0x2591) { $k = 0.3 }
+                    $rgb = Get-RainbowRgb ($i / $last) $k
                     if ($trueColor) { [void]$sb.Append("$esc[38;2;$($rgb[0]);$($rgb[1]);$($rgb[2])m") }
                     else { [void]$sb.Append("$esc[38;5;$(Get-Ansi256 $rgb)m") }
                 }
@@ -102,21 +112,25 @@ function Install-Yurlungr {
         if (-not $NoNewline) { Write-Host '' }
     }
 
-    function Show-Banner {
-        # The snake, ASCII-coded (# full block, ^ upper half, v lower half). It is the
-        # same picture as assets/snake.txt.
-        $art = @(
-            '                                       vv#v',
-            '            vv######v               vv###^^#v      v',
-            '          v####^^^####v           v###########vvvv^',
-            '        v###^       ^###v       v###^    ^^^###v  ^v',
-            '^vv  vv###^           ^####vvv####^            ^',
-            '  ^^##^^                ^^######^'
-        )
+    # The snake, ASCII-coded (# full block, ^ upper half, v lower half; % side, : shadow).
+    # It is the same picture as assets/snake.txt, made by scripts/make-snake.py.
+    $art = @(
+        '                                       vv#v',
+        '            vv######v               vv###^^#v      v',
+        '          v####^^^####v           v###########vvvv^%%%',
+        '        v###^%%%%%%%^###v       v###^%%%%^^^###v%%^v%::',
+        '^vv  vv###^%%%%:::::::^####vvv####^%%%%::::%%%%^%%::%%:',
+        '  ^^##^^%%%%%::::       ^^######^%%%%::::    ::::%::  :',
+        '    %%%%%%:::::           %%%%%%%%%::::            :',
+        '      ::::::                :::::::::'
+    )
+
+    # One picture of the banner, in the current $phase.
+    function Write-Banner {
         Write-Host ''
         foreach ($line in $art) {
-            $line = $line.Replace('#', [string][char]0x2588).Replace('^', [string][char]0x2580).Replace('v', [string][char]0x2584)
-            Write-Rainbow $line 52
+            $line = $line.Replace('#', [string][char]0x2588).Replace('^', [string][char]0x2580).Replace('v', [string][char]0x2584).Replace('%', [string][char]0x2593).Replace(':', [string][char]0x2591)
+            Write-Rainbow $line 55
         }
         Write-Host ''
         Write-Host '  ' -NoNewline
@@ -124,6 +138,30 @@ function Install-Yurlungr {
         if ($vt) { Write-Host "  $esc[2ma terminal workspace for coding agents$esc[0m" }
         else { Write-Host '  a terminal workspace for coding agents' }
         Write-Host ''
+    }
+
+    # The rainbow flows once round the snake, then it settles. Only where escape
+    # sequences work and the window is tall enough, and not with $env:YURLUNGR_NO_ANIM=1.
+    function Show-Banner {
+        $height = 30
+        try { $height = [Console]::WindowHeight } catch { }
+        $noAnim = $env:YURLUNGR_NO_ANIM -and $env:YURLUNGR_NO_ANIM -ne '0'
+        if ($vt -and -not $plain -and -not $noAnim -and $height -ge 20) {
+            $lines = $art.Count + 5
+            Write-Host "$esc[?25l" -NoNewline
+            try {
+                for ($frame = 0; $frame -lt 24; $frame++) {
+                    $phase = $frame / 24
+                    Write-Banner
+                    Write-Host "$esc[${lines}A" -NoNewline
+                    Start-Sleep -Milliseconds 55
+                }
+            } finally {
+                Write-Host "$esc[?25h" -NoNewline
+            }
+        }
+        $phase = 0.0
+        Write-Banner
     }
 
     # ---- messages ------------------------------------------------------------
