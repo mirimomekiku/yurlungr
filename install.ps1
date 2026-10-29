@@ -146,7 +146,7 @@ function Install-Yurlungr {
         $height = 30
         try { $height = [Console]::WindowHeight } catch { }
         $noAnim = $env:YURLUNGR_NO_ANIM -and $env:YURLUNGR_NO_ANIM -ne '0'
-        if ($vt -and -not $plain -and -not $noAnim -and $height -ge 20) {
+        if ($vt -and -not $plain -and -not $noAnim -and $height -ge 22) {
             $lines = $art.Count + 5
             Write-Host "$esc[?25l" -NoNewline
             try {

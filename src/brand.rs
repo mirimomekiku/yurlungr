@@ -197,8 +197,11 @@ fn motion_disabled() -> bool {
 /// which is what stays on screen (and all there is when output is piped).
 pub fn show(color: Color) {
     let mut out = io::stdout().lock();
-    if color != Color::None && !motion_disabled() {
-        let lines = banner(color).lines().count();
+    let lines = banner(color).lines().count();
+    // The cursor can only move back up over what is still on screen.
+    let tall_enough =
+        crossterm::terminal::size().is_ok_and(|(_, rows)| usize::from(rows) >= lines + 3);
+    if color != Color::None && !motion_disabled() && tall_enough {
         let _ = write!(out, "\x1b[?25l"); // hide the cursor while it plays
         for frame in 0..FRAMES {
             let _ = write!(out, "{}\x1b[{lines}A", banner_at(color, frame as f64 / FRAMES as f64));

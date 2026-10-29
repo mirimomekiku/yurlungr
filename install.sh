@@ -211,7 +211,7 @@ paint_banner() {
 banner() {
     rows=$(tput lines 2>/dev/null || echo 24)
     if [ "$FANCY" = 1 ] && [ "$COLOR" != none ] && [ "${YURLUNGR_NO_ANIM:-0}" = 0 ] &&
-        [ "$rows" -ge 20 ] && sleep 0.05 2>/dev/null; then
+        [ "$rows" -ge 22 ] && sleep 0.05 2>/dev/null; then
         lines=$(($(snake_art | wc -l) + 5))
         printf '%s[?25l' "$ESC"
         i=0
