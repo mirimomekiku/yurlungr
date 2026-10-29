@@ -4,7 +4,7 @@
 use std::{
     fs,
     io::{self, BufRead, BufReader, Read},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
     sync::mpsc::{self, RecvTimeoutError, Sender},
     thread,
@@ -33,7 +33,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DIM: u16 = 1000;
 
 enum Incoming {
-    Connected { id: u64, stream: TcpStream, cols: u16, rows: u16 },
+    Connected { id: u64, stream: TcpStream, cols: u16, rows: u16, force: bool },
     Msg(u64, ClientMsg),
     Gone(u64),
     Report { pane: usize, agent: String, state: ReportState },
@@ -92,8 +92,10 @@ fn serve_conn(id: u64, stream: TcpStream, token: String, tx: Sender<Incoming>) {
     if (&mut reader).take(4096).read_line(&mut line).is_err() {
         return;
     }
-    let (cols, rows) = match serde_json::from_str::<ClientMsg>(&line) {
-        Ok(ClientMsg::Hello { token: given, cols, rows }) if given == token => (cols, rows),
+    let (cols, rows, force) = match serde_json::from_str::<ClientMsg>(&line) {
+        Ok(ClientMsg::Hello { token: given, cols, rows, force }) if given == token => {
+            (cols, rows, force)
+        }
         Ok(ClientMsg::Report { token: given, pane, agent, state }) => {
             if given == token {
                 let _ = tx.send(Incoming::Report { pane, agent, state });
@@ -106,7 +108,7 @@ fn serve_conn(id: u64, stream: TcpStream, token: String, tx: Sender<Incoming>) {
     // A client that stops reading must not freeze the single server loop: a
     // timed-out write is an error, and the loop then drops that client.
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-    if tx.send(Incoming::Connected { id, stream, cols, rows }).is_err() {
+    if tx.send(Incoming::Connected { id, stream, cols, rows, force }).is_err() {
         return;
     }
 
@@ -145,7 +147,14 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
 
         for msg in msgs {
             match msg {
-                Incoming::Connected { id, stream, cols, rows } => {
+                Incoming::Connected { id, mut stream, cols, rows, force } => {
+                    // One attached client per session: a second one is turned
+                    // away unless it asked to take over.
+                    if client.is_some() && !force {
+                        let _ = proto::send(&mut stream, &ServerMsg::Busy);
+                        let _ = stream.shutdown(Shutdown::Both);
+                        continue;
+                    }
                     if let Some(mut old) = client.take() {
                         let _ = proto::send(&mut old.stream, &ServerMsg::Detached);
                     }

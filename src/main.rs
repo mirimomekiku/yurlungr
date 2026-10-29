@@ -19,6 +19,7 @@ mod proto;
 mod server;
 mod settings;
 mod settings_dialog;
+mod termcaps;
 mod terminal;
 mod theme;
 mod ui;
@@ -44,6 +45,10 @@ struct Cli {
 
     /// Directory the session starts in (defaults to the current directory).
     path: Option<PathBuf>,
+
+    /// Attach even if the session is already open in another terminal (that one is detached).
+    #[arg(short, long)]
+    force: bool,
 
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -98,6 +103,7 @@ fn main() -> Result<()> {
         Some(Cmd::Integration { action, agent }) => integration::run(action, agent),
         Some(Cmd::Setup { yes }) => onboarding::run(yes),
         None => {
+            client::ensure_interactive()?;
             if onboarding::needed() {
                 if let Err(e) = onboarding::run(false) {
                     eprintln!("setup skipped: {e:#}");
@@ -107,7 +113,7 @@ fn main() -> Result<()> {
                 Some(p) => p.canonicalize()?,
                 None => env::current_dir()?,
             };
-            client::attach(&cli.session, &root)
+            client::attach(&cli.session, &root, cli.force)
         }
     }
 }

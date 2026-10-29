@@ -35,6 +35,9 @@ pub enum ClientMsg {
         token: String,
         cols: u16,
         rows: u16,
+        /// Take the session over even if another client is attached.
+        #[serde(default)]
+        force: bool,
     },
     /// One-shot message from an agent hook; never replaces the attached client.
     Report {
@@ -58,6 +61,8 @@ pub enum ServerMsg {
     },
     /// Base64 payload for an OSC 52 clipboard write.
     Clipboard(String),
+    /// Another client is already attached and this one did not ask to replace it.
+    Busy,
     /// The client was detached (prefix+d) or replaced by another client.
     Detached,
     /// The session ended.

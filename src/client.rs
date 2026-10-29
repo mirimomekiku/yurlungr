@@ -1,7 +1,7 @@
 //! The thin terminal client: paints what the server sends and forwards input.
 
 use std::{
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, IsTerminal, Write},
     net::TcpStream,
     path::Path,
     process::{Command, Stdio},
@@ -21,7 +21,10 @@ use crossterm::{
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 
-use crate::proto::{self, ClientMsg, ServerMsg};
+use crate::{
+    proto::{self, ClientMsg, ServerMsg},
+    termcaps::ColorLevel,
+};
 
 fn spawn_server(session: &str, root: &Path) -> Result<()> {
     let mut cmd = Command::new(std::env::current_exe()?);
@@ -66,13 +69,24 @@ pub fn kill(session: &str) -> Result<()> {
     let Some((mut stream, token)) = proto::connect(session) else {
         bail!("no running session named '{session}'");
     };
-    proto::send(&mut stream, &ClientMsg::Hello { token, cols: 80, rows: 24 })?;
+    proto::send(&mut stream, &ClientMsg::Hello { token, cols: 80, rows: 24, force: true })?;
     proto::send(&mut stream, &ClientMsg::Kill)?;
     println!("session '{session}' stopped");
     Ok(())
 }
 
-pub fn attach(session: &str, root: &Path) -> Result<()> {
+/// Fail early, and clearly, when there is no terminal to draw on.
+pub fn ensure_interactive() -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        bail!("yurlungr needs an interactive terminal (stdin and stdout must be a TTY)");
+    }
+    if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+        bail!("TERM=dumb cannot show yurlungr; use a real terminal emulator");
+    }
+    Ok(())
+}
+
+pub fn attach(session: &str, root: &Path, force: bool) -> Result<()> {
     let (mut stream, token) = connect_or_start(session, root)?;
 
     let mut terminal = ratatui::init();
@@ -87,7 +101,7 @@ pub fn attach(session: &str, root: &Path) -> Result<()> {
         io::stdout(),
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
-    let result = run(&mut stream, &mut terminal, token, size.width, size.height);
+    let result = run(&mut stream, &mut terminal, token, size.width, size.height, force);
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
@@ -107,8 +121,10 @@ fn run(
     token: String,
     cols: u16,
     rows: u16,
+    force: bool,
 ) -> Result<bool> {
-    proto::send(stream, &ClientMsg::Hello { token, cols, rows })?;
+    let level = ColorLevel::detect();
+    proto::send(stream, &ClientMsg::Hello { token, cols, rows, force })?;
 
     let (tx, rx) = mpsc::channel();
     let reader = BufReader::new(stream.try_clone()?);
@@ -134,8 +150,12 @@ fn run(
                     if full || local.area.width != width || local.area.height != height {
                         local = Buffer::empty(Rect::new(0, 0, width, height));
                     }
-                    for (x, y, cell) in cells {
+                    for (x, y, mut cell) in cells {
                         if x < width && y < height {
+                            if level != ColorLevel::TrueColor {
+                                cell.fg = level.apply(cell.fg);
+                                cell.bg = level.apply(cell.bg);
+                            }
                             local[(x, y)] = cell;
                         }
                     }
@@ -146,6 +166,10 @@ fn run(
                     write!(out, "\x1b]52;c;{b64}\x07")?;
                     out.flush()?;
                 }
+                ServerMsg::Busy => bail!(
+                    "this session is already open in another terminal; \
+                     detach it there (Ctrl+B d), or run with --force to take it over"
+                ),
                 ServerMsg::Detached => return Ok(false),
                 ServerMsg::Bye => return Ok(true),
             }
