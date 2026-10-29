@@ -26,6 +26,12 @@ use crate::{
     ui,
 };
 
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Largest terminal size a client may announce; bigger values would make the
+/// server allocate an enormous screen buffer.
+const MAX_DIM: u16 = 1000;
+
 enum Incoming {
     Connected { id: u64, stream: TcpStream, cols: u16, rows: u16 },
     Msg(u64, ClientMsg),
@@ -97,6 +103,9 @@ fn serve_conn(id: u64, stream: TcpStream, token: String, tx: Sender<Incoming>) {
         _ => return,
     };
     let _ = stream.set_read_timeout(None);
+    // A client that stops reading must not freeze the single server loop: a
+    // timed-out write is an error, and the loop then drops that client.
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     if tx.send(Incoming::Connected { id, stream, cols, rows }).is_err() {
         return;
     }
@@ -140,7 +149,7 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
                     if let Some(mut old) = client.take() {
                         let _ = proto::send(&mut old.stream, &ServerMsg::Detached);
                     }
-                    tui.backend_mut().resize(cols.max(1), rows.max(1));
+                    tui.backend_mut().resize(cols.clamp(1, MAX_DIM), rows.clamp(1, MAX_DIM));
                     client = Some(Client { id, stream, prev: Buffer::empty(Rect::default()) });
                 }
                 Incoming::Msg(_, ClientMsg::Kill) => killed = true,
@@ -148,7 +157,7 @@ fn main_loop(session: &str, root: PathBuf, rx: &mpsc::Receiver<Incoming>) -> Res
                     if client.as_ref().is_some_and(|c| c.id == id) =>
                 {
                     if let Event::Resize(w, h) = ev {
-                        tui.backend_mut().resize(w.max(1), h.max(1));
+                        tui.backend_mut().resize(w.clamp(1, MAX_DIM), h.clamp(1, MAX_DIM));
                         if let Some(c) = &mut client {
                             c.prev = Buffer::empty(Rect::default());
                         }
