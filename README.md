@@ -1,3 +1,7 @@
+<p align="center">
+  <a href="https://github.com/mirimomekiku/yurlungr/releases/latest"><img src="assets/banner.webp" alt="Yurlungr: coding agents in your pocket. Claude Code, Codex, Gemini CLI and 19 more, natively on Android" width="100%"></a>
+</p>
+
 <h1 align="center">Yurlungr: AI coding agents on Android</h1>
 
 <p align="center">
